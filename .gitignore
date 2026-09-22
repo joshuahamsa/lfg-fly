@@ -1,0 +1,27 @@
+# Secrets — the fly's RegularKey seed lives in .env and must never be committed.
+.env
+.env.*
+secrets/
+*.seed
+*_state.json
+
+# Data lives in FLY_DATA_DIR (~/fly-data) — never in the repo (the connectome is
+# downloaded, not redistributed; renders/sims/records are regenerable).
+fly-data/
+data/raw/
+*.feather
+*.parquet
+*.npz
+*.pt
+
+# Python / tooling
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/

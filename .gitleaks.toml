@@ -1,0 +1,10 @@
+# gitleaks' default rules do NOT detect XRPL family seeds (verified 2026-09-22),
+# and this repo is public. Keep the defaults and add a seed rule.
+[extend]
+useDefault = true
+
+[[rules]]
+id = "xrpl-family-seed"
+description = "XRPL family seed (secp256k1 's…' 29 chars, ed25519 'sEd…' 31 chars)"
+regex = '''\bs(?:Ed)?[1-9A-HJ-NP-Za-km-z]{28}\b'''
+keywords = ["s"]
