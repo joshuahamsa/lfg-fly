@@ -68,6 +68,73 @@ def _cmd_catalog(args: argparse.Namespace) -> int:
     return 0
 
 
+def _load_context(args: argparse.Namespace):
+    from lfg_fly import paths
+    from lfg_fly.brain.senses import build_retina
+    from lfg_fly.connectome import build as B
+    from lfg_fly.connectome.columns import load_columns
+    from lfg_fly.connectome.neurons import populations
+    from lfg_fly.teacher.catalog import Catalog
+    from lfg_fly.teacher.grid import Context
+    from lfg_fly.teacher.render import LayerBank, load_zorder
+    from lfg_fly.teacher.sample import make_probe_set
+
+    g = B.load_graph(paths.graph_dir() / f"graph-syn{args.min_syn}.npz")
+    pops = populations(g)
+    retina = build_retina(load_columns(paths.graph_dir() / f"columns-syn{args.min_syn}.npz"), g)
+    cache = paths.network_dir("mainnet") / "catalog"
+    cat = Catalog.from_json((cache / "catalog-male.json").read_text())
+    bank = LayerBank(cat, cache, size=64, device=args.device)
+    return Context(graph=g, pops=pops, retina=retina, catalog=cat, bank=bank,
+                   zorder=load_zorder(cache), device=args.device,
+                   probe_set=make_probe_set(cat, n_pairs=args.pairs, seed=0), seed=0)
+
+
+def _cmd_grid(args: argparse.Namespace) -> int:
+    import json
+
+    from lfg_fly import env, paths
+    from lfg_fly.teacher import grid as G
+    from lfg_fly.teacher import probe as P
+    from lfg_fly.teacher.sample import bayes_ceiling
+
+    env.configure_libraries()
+    ctx = _load_context(args)
+    out = paths.repo_root() / "data" / "probe"
+    a = G.read_jsonl(out / "stage_a.jsonl")
+    if args.stage in ("a", "all"):
+        a = G.stage_a(ctx, G.default_grid(), out / "stage_a.jsonl")
+        print(f"stage A: {sum(r['passed'] for r in a)}/{len(a)} passed")
+    b = G.read_jsonl(out / "stage_b.jsonl")
+    if args.stage in ("b", "all"):
+        b = G.stage_b(ctx, a, out / "stage_b.jsonl", cap=args.cap)
+        print(f"stage B: probed {len(b)}")
+    c_path = out / "stage_c.json"
+    c = json.loads(c_path.read_text()) if c_path.exists() else {}
+    eligible = [r for r in b if r["passed"]]
+    if args.stage in ("c", "all") and eligible:
+        c = G.stage_c(ctx, max(eligible, key=lambda r: r["probe"]["heldout"]), c_path)
+    ps = ctx.probe_set
+    one_hot = P.evaluate(P.one_hot(ps.looks, ctx.catalog), ps, device=args.device).as_dict()
+    v = G.verdict(a, b, c, one_hot, bayes_ceiling(ps.p[ps.test]))
+    v["graph_hash"] = ctx.graph.graph_hash()
+    v["catalog_values"] = {slot: len(vals) for slot, vals in ctx.catalog.values.items()}
+    out.mkdir(parents=True, exist_ok=True)  # `--stage b|c` on a fresh checkout wrote nothing yet
+    (out / "verdict.json").write_text(json.dumps(v, indent=1, sort_keys=True) + "\n")
+    best = (f" (best held-out {v['best']['probe']['heldout']:.3f})" if v["best"]
+            else " (no eligible setting)")
+    print(f"VERDICT: {'PASS' if v['pass'] else 'FAIL'}" + best)
+    return 0
+
+
+def _cmd_report(args: argparse.Namespace) -> int:
+    from lfg_fly import paths
+    from lfg_fly.teacher.report import write_report
+
+    write_report(paths.repo_root() / "data" / "probe", paths.repo_root() / "docs" / "PHASE0.md")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="fly", description="The fly: an LFG-dressing connectome")
     sub = parser.add_subparsers(dest="command")
@@ -89,6 +156,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--api", default="http://localhost:8176")
     p.add_argument("--body", default="male")
     p.set_defaults(func=_cmd_catalog)
+
+    p = sub.add_parser("grid",
+                       help="run the Phase 0 probe grid (Stages A, B, C) and write a verdict")
+    p.add_argument("--device", default="cuda")
+    p.add_argument("--min-syn", type=int, default=3)
+    p.add_argument("--pairs", type=int, default=3000)
+    p.add_argument("--cap", type=int, default=24)
+    p.add_argument("--stage", choices=["a", "b", "c", "all"], default="all")
+    p.set_defaults(func=_cmd_grid)
+
+    p = sub.add_parser("report", help="write docs/PHASE0.md from data/probe")
+    p.set_defaults(func=_cmd_report)
 
     return parser
 
