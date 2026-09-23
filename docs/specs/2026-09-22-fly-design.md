@@ -412,6 +412,41 @@ This probe is a diagnostic, not a gate: §3.0's verdict stands. The report
 (`docs/PHASE0B.md`) states every reading, whatever it says, and the critic
 phase goes ahead or not on the operator's call.
 
+**Calibration result (2026-09-23).** Ceiling-minus-oracle gaps: latent 0.129
+(selection) / 0.141 (confirmation), visual 0.074 / 0.078. Both clear 0.03, so
+nothing was retuned.
+
+**Amendment 1 (2026-09-23, before any Stage B row or interaction-taste score
+was seen).** The reproduction pre-flight stopped the run: Phase 0's best
+setting rescored 0.750 against Phase 0's stored 0.760. Diagnosis:
+- The new code is exact. The additive taste's labels equal Phase 0's bit for
+  bit, and on identical features the relabelled set scores exactly as Phase 0's
+  set does.
+- The simulator is not. CUDA's sparse products and atomic adds make features
+  differ by up to ~4e-7 between identical runs.
+- The readout's CV curve is nearly flat at the top (λ = 0.01: 0.7229, λ = 1:
+  0.7208), so that rounding sometimes flips the chosen λ. The held-out score
+  follows the λ: 0.743 / 0.760 / 0.770 / 0.750 at λ = 0.001 / 0.01 / 0.1 / 1
+  on one feature set. The failing run's 0.7500 is exactly λ = 1's score.
+- Eleven repeat runs all chose λ = 0.01 and scored 0.755–0.762; the failing
+  run's flip to λ = 1 gave 0.750. So every Phase 0 and Phase 0b score carries
+  about ±0.01 of run-to-run noise, well inside every reported CI (±0.03).
+
+A per-setting 0.005 tolerance sits inside that noise, so it can't tell a bug
+from rounding. The check becomes:
+- **Hard stop:** the additive taste's labels must equal Phase 0's exactly, on
+  both sets. The relabelling is the only new code between Phase 0's features
+  and this probe's scores.
+- **Systematic-shift stop:** every setting's additive score minus Phase 0's is
+  recorded. Stage C refuses to run if the mean difference over all probed
+  settings exceeds ±0.005: rounding flips average out over ~130 settings,
+  a pipeline change wouldn't.
+- The report gives the mean, spread and largest difference, and how many
+  settings chose a different λ than in Phase 0.
+
+Making the simulator deterministic is a separate task. Everything else in
+§3.0b is unchanged.
+
 ### 3.1 Looks and pairs (after the gate)
 
 - **Catalog:** the union of `/api/rarity?body=<b>` values over all five
