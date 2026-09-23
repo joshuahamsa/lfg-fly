@@ -344,6 +344,74 @@ comparison.
 Nothing downstream (critic tokens, the LFG PR, wallets) starts before this
 verdict.
 
+### 3.0b Phase 0b: interaction probe (pre-registered 2026-09-23, before any run)
+
+**Why.** Phase 0 passed at 0.758, but the rewired twin (0.777) and the
+no-brain one-hot model (0.770) did as well. Its taste was additive, and for
+an additive taste a plain model on the trait list is already the right tool.
+The fly's pitch, "an unexpected combination that works", is about trait
+**interactions**. This probe asks whether the fly learns a taste with
+interactions, and whether the real wiring helps there. It runs on the GPU
+only and costs no critic tokens.
+
+**Learnable interactions only.** With about 3,000 pairs, no model can learn
+arbitrary value-by-value interactions (Head × Clothing alone is 18k
+combinations). So each planted interaction runs through shared structure.
+
+**Tastes.** Phase 0's looks, pairs, families and splits are reused unchanged
+(selection seed 0, confirmation seed 1000); only the labels change, so one
+simulation per setting scores every taste.
+
+| Taste | Utility U(look) |
+|---|---|
+| `additive` | Phase 0's taste, rescored as a **reproduction check**: a Stage B score off Phase 0's by more than 0.005 stops the run |
+| `latent` | ½ additive + ½ **latent harmony**: every trait value has a hidden vector z ~ N(0, I₃), centred per slot over its catalog values, and harmony = Σ over the 36 slot pairs of ⟨z_i, z_j⟩ |
+| `visual` | ½ additive + ½ **pixels**, from the 64×64 render: figure–ground *contrast* \|L(character) − L(background)\| plus *hue harmony* s_c·s_b·cos(2Δhue), each standardized |
+
+"½ + ½" means the interaction term is centred and scaled to the additive
+term's standard deviation over the probe looks, and U = (A + I)/√2. Labels
+are P(A ≻ B) = σ(1.2·ΔU), as in Phase 0. Each taste draws its own additive
+weights, latent vectors and label noise, from its own seed offset (additive
+0, latent 100, visual 200), and the confirmation set draws them again. The
+visual rule itself is fixed, as the critic's taste would be.
+
+**Brains.** Stage A doesn't depend on the taste, so its records are reused.
+Every Stage A passer (130) is probed again on each taste's selection set. For
+each taste, the best eligible setting is confirmed on the confirmation set,
+together with its rewired and sign-shuffled twins (the same twins as Phase 0).
+
+**Controls, per taste, on the confirmation set:**
+- Bayes ceiling.
+- **Additive oracle:** the least-squares additive (one-hot) fit to the true
+  U over the probe looks, scored like the Bayes ceiling (expected accuracy
+  under p). The gap between the ceiling and the oracle is what only the
+  interactions carry.
+- One-hot logistic regression (Phase 0's no-brain control).
+- One-hot + pixel stats (mean RGB + an 8-bin luminance histogram) logistic
+  regression: §3.4 control 2.
+- MLP (256 hidden) on the same inputs: §3.4 control 3.
+- Rewired and sign-shuffled twins of the fly's best setting.
+
+**Pre-registered readings.** Each is a paired family bootstrap (2,000
+resamples, the same test pairs for both models), and a reading holds iff the
+95% CI of the difference lies above 0:
+
+| Reading | Holds iff |
+|---|---|
+| **Learns it** | the fly's confirmation CI lower bound > 0.55 (Gate B's bar) |
+| **Uses interactions** | fly − one-hot logistic regression > 0 |
+| **Wiring matters** | fly − rewired twin > 0 |
+| **Beats no-brain** | fly − MLP > 0 |
+
+**Calibration pre-flight.** Before any brain runs, the tastes and no-brain
+controls are scored alone. If an interaction taste's ceiling-minus-oracle gap
+is below 0.03, its interaction term is too weak to test anything; it is
+retuned, and the retune is recorded here, before Stage B.
+
+This probe is a diagnostic, not a gate: §3.0's verdict stands. The report
+(`docs/PHASE0B.md`) states every reading, whatever it says, and the critic
+phase goes ahead or not on the operator's call.
+
 ### 3.1 Looks and pairs (after the gate)
 
 - **Catalog:** the union of `/api/rarity?body=<b>` values over all five
