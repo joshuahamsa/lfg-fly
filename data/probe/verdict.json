@@ -1,0 +1,168 @@
+{
+ "best": {
+  "context": "8d81c52581aeff33",
+  "decodability": {
+   "Accessory": {
+    "acc": 0.90625,
+    "chance": 0.2958098811757348,
+    "values": 50
+   },
+   "Back": {
+    "acc": 1.0,
+    "chance": 0.5975609756097561,
+    "values": 5
+   },
+   "Background": {
+    "acc": 0.7475000023841858,
+    "chance": 0.052845528455284556,
+    "values": 54
+   },
+   "Body": {
+    "acc": 0.9387499690055847,
+    "chance": 0.24577861163227016,
+    "values": 13
+   },
+   "Clothing": {
+    "acc": 0.6487500071525574,
+    "chance": 0.03158223889931207,
+    "values": 107
+   },
+   "Eyebrows": {
+    "acc": 0.8037499785423279,
+    "chance": 0.07004377736085053,
+    "values": 39
+   },
+   "Eyes": {
+    "acc": 0.8012499809265137,
+    "chance": 0.05565978736710444,
+    "values": 55
+   },
+   "Head": {
+    "acc": 0.5249999761581421,
+    "chance": 0.020637898686679174,
+    "values": 169
+   },
+   "Mouth": {
+    "acc": 0.6762499809265137,
+    "chance": 0.04971857410881801,
+    "values": 76
+   }
+  },
+  "dropped_by_cap": 0,
+  "key": "{\"brain\": {\"alpha\": 0.7, \"bias\": 0.1, \"burn_in\": 200, \"g_syn\": 1.0, \"kind\": \"rate\", \"noise\": 0.0, \"refractory\": 2, \"seed\": 0, \"steps\": 60, \"tau_ms\": 20.0, \"trials\": 1}, \"code\": \"all-sensory-brain\", \"g_in\": 2.0}",
+  "passed": true,
+  "probe": {
+   "ci_hi": 0.7933333333333333,
+   "ci_lo": 0.7266666666666667,
+   "cv_acc": 0.7237500190734864,
+   "heldout": 0.76,
+   "lam": 0.01,
+   "n_test": 600,
+   "train_acc": 0.8862500190734863
+  },
+  "seconds": 201.93,
+  "setting": {
+   "brain": {
+    "alpha": 0.7,
+    "bias": 0.1,
+    "burn_in": 200,
+    "g_syn": 1.0,
+    "kind": "rate",
+    "noise": 0.0,
+    "refractory": 2,
+    "seed": 0,
+    "steps": 60,
+    "tau_ms": 20.0,
+    "trials": 1
+   },
+   "code": "all-sensory-brain",
+   "g_in": 2.0
+  },
+  "stats": {
+   "active_frac": 0.8243601322174072,
+   "max_step_frac": 1.211225662700599e-05,
+   "readout_active_frac": 0.9837597012519836
+  }
+ },
+ "catalog_values": {
+  "Accessory": 50,
+  "Back": 5,
+  "Background": 54,
+  "Body": 13,
+  "Clothing": 107,
+  "Eyebrows": 39,
+  "Eyes": 55,
+  "Head": 169,
+  "Mouth": 76
+ },
+ "confirm_seed": 1000,
+ "confirmation": {
+  "ci_hi": 0.7883333333333333,
+  "ci_lo": 0.726625,
+  "cv_acc": 0.7329167127609253,
+  "heldout": 0.7583333333333333,
+  "lam": 0.01,
+  "n_test": 600,
+  "stats": {
+   "active_frac": 0.8243557214736938,
+   "max_step_frac": 1.211225662700599e-05,
+   "readout_active_frac": 0.983765721321106
+  },
+  "train_acc": 0.8958333730697632
+ },
+ "confirmed": true,
+ "context": "8d81c52581aeff33",
+ "controls": {
+  "bayes_ceiling": 0.8187727274064341,
+  "one_hot": {
+   "ci_hi": 0.8,
+   "ci_lo": 0.7383333333333333,
+   "cv_acc": 0.7645833849906921,
+   "heldout": 0.77,
+   "lam": 10.0,
+   "n_test": 600,
+   "train_acc": 0.909166693687439
+  },
+  "rewired": {
+   "ci_hi": 0.8083333333333333,
+   "ci_lo": 0.7433333333333333,
+   "cv_acc": 0.76208336353302,
+   "heldout": 0.7766666666666666,
+   "lam": 10.0,
+   "n_test": 600,
+   "stats": {
+    "active_frac": 0.9245986938476562,
+    "max_step_frac": 0.0,
+    "readout_active_frac": 0.9894702434539795
+   },
+   "train_acc": 0.9108333587646484
+  },
+  "sign_shuffled": {
+   "ci_hi": 0.7666666666666667,
+   "ci_lo": 0.7,
+   "cv_acc": 0.74000004529953,
+   "heldout": 0.7333333333333333,
+   "lam": 0.01,
+   "n_test": 600,
+   "stats": {
+    "active_frac": 0.9300097227096558,
+    "max_step_frac": 4.844902650802396e-05,
+    "readout_active_frac": 0.9971020817756653
+   },
+   "train_acc": 0.9012500047683716
+  }
+ },
+ "controls_set": "confirmation",
+ "dropped_by_cap": 0,
+ "gate": 0.6,
+ "graph_hash": "f2f62e0a0bbf145e285cfe6cd3b6ec9a02d328cd36639b675d491b2efc3bed1b",
+ "pass": true,
+ "seed": 0,
+ "selection_heldout": 0.76,
+ "selection_pool": 130,
+ "stage_a": {
+  "passed": 130,
+  "screened": 420
+ },
+ "stage_b_probed": 130
+}
