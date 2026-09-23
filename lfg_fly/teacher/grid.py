@@ -11,14 +11,21 @@
   `passed: False` and ineligible for the gate.
   Every probed setting also gets per-slot decodability, so the report can say
   which input code carries identity even when nothing passes the gate.
-- Stage C: the best eligible setting's rewired and sign-shuffled twins, plus
-  per-slot decodability.
+- Stage C: the confirmation. Stage B scores every passer on the same selection
+  probe set, and the best is the maximum of those scores, so its number is
+  optimistic (the winner's curse). Stage C scores that one setting, its rewired
+  and sign-shuffled twins, and the one-hot control on the confirmation set: an
+  independent instance of the task (fresh pairs, families and planted taste,
+  from seed `seed + CONFIRM_SEED_OFFSET`) that no selection ever saw. The gate
+  is the confirmation score. Per-slot decodability stays on the selection set.
 
 Every stage appends JSON lines, keyed by `Setting.key()`, so a killed run
 resumes where it stopped. Every record is stamped with the run's context
 fingerprint (graph, threshold, probe-set size, seed, catalog), and resume
 reuses only records from the same context: a rebuilt graph or a different
-`--min-syn` / `--pairs` never inherits stale numbers.
+`--min-syn` / `--pairs` never inherits stale numbers. The confirmation set is
+deliberately not part of the fingerprint: it touches no Stage A or B number, and
+Stage C carries its own `confirm_seed`.
 """
 
 from __future__ import annotations
@@ -44,6 +51,7 @@ from lfg_fly.teacher.sample import base_look, near_variant
 GATE = 0.60
 BATCH_COLUMNS = 512  # looks x trials per GPU batch (8 GB card, N = 165k)
 FALLBACK_PROBES = 6  # ineligible settings probed for the report when nothing passes Stage A
+CONFIRM_SEED_OFFSET = 1000  # the confirmation probe set is drawn from seed + this
 
 log = logging.getLogger(__name__)
 
@@ -95,6 +103,8 @@ class Context:
     device: str
     probe_set: Any
     seed: int = 0
+    # Stage C's independent probe set (seed + CONFIRM_SEED_OFFSET); never in the fingerprint
+    confirm_set: Any = None
 
 
 def context_fingerprint(ctx: Context) -> str:
@@ -102,7 +112,9 @@ def context_fingerprint(ctx: Context) -> str:
 
     A short hex digest over the graph hash, its synapse threshold, the probe-set
     size, the seed and the catalog's canonical JSON. Resume reuses only records
-    stamped with the current fingerprint.
+    stamped with the current fingerprint. `confirm_set` is left out on purpose:
+    no Stage A or B number depends on it, and Stage C is matched on its own
+    `confirm_seed` (see `stage_c_matches`).
     """
     payload = {
         "graph_hash": ctx.graph.graph_hash(),
@@ -362,23 +374,45 @@ def stage_b(ctx: Context, records: list[dict], out_path: Path, cap: int | None =
 
 
 def stage_c(ctx: Context, best: dict, out_path: Path) -> dict:
-    from lfg_fly.teacher.rewire import rewired_graph, sign_shuffled_graph
+    """Confirm the best setting on the independent confirmation set.
 
+    Writes `confirmation` (the best setting on the real graph), its `rewired` and
+    `sign_shuffled` twins, `one_hot_confirmation` and `bayes_confirmation`, all on
+    `ctx.confirm_set`, so every control compares like with like. `decodability`
+    stays on the selection set, as Stage B's does.
+    """
+    from lfg_fly.teacher.rewire import rewired_graph, sign_shuffled_graph
+    from lfg_fly.teacher.sample import bayes_ceiling
+
+    cs = ctx.confirm_set
+    if cs is None:  # never fall back to the selection set: that number is the biased one
+        raise ValueError("stage C needs ctx.confirm_set, the independent confirmation probe set "
+                         f"(seed {ctx.seed} + {CONFIRM_SEED_OFFSET})")
     setting = _setting_from(best)
-    ps, out = ctx.probe_set, {"key": best["key"], "context": context_fingerprint(ctx)}
+    out = {"key": best["key"], "context": context_fingerprint(ctx),
+           "confirm_seed": ctx.seed + CONFIRM_SEED_OFFSET}
+    ps = ctx.probe_set
+    sim = Simulator(ctx.graph, ctx.pops.sensory_any, ctx.pops.readout, ctx.device)
+    X, stats = features_for(ctx, sim, setting, cs.looks, {})
+    out["confirmation"] = {**P.evaluate(X, cs, device=ctx.device, seed=ctx.seed).as_dict(),
+                           "stats": stats}
+    X, _ = features_for(ctx, sim, setting, ps.looks, {})
+    out["decodability"] = P.per_slot_decodability(X, ps.looks, ctx.catalog,
+                                                  _look_train_mask(ps), ctx.device)
+    del sim  # one simulator on the GPU at a time
     rewired, repairs = rewired_graph(ctx.graph, seed=ctx.seed + 11, device=ctx.device)
     twins = (("rewired", rewired),
              ("sign_shuffled", sign_shuffled_graph(ctx.graph, ctx.seed + 13)))
     for name, graph in twins:
         sim = Simulator(graph, ctx.pops.sensory_any, ctx.pops.readout, ctx.device)
-        X, stats = features_for(ctx, sim, setting, ps.looks, {})
-        out[name] = {**P.evaluate(X, ps, device=ctx.device, seed=ctx.seed).as_dict(),
+        X, stats = features_for(ctx, sim, setting, cs.looks, {})
+        out[name] = {**P.evaluate(X, cs, device=ctx.device, seed=ctx.seed).as_dict(),
                      "stats": stats}
+        del sim
     out["rewire_repairs"] = repairs
-    sim = Simulator(ctx.graph, ctx.pops.sensory_any, ctx.pops.readout, ctx.device)
-    X, _ = features_for(ctx, sim, setting, ps.looks, {})
-    out["decodability"] = P.per_slot_decodability(X, ps.looks, ctx.catalog,
-                                                  _look_train_mask(ps), ctx.device)
+    out["one_hot_confirmation"] = P.evaluate(P.one_hot(cs.looks, ctx.catalog), cs,
+                                             device=ctx.device, seed=ctx.seed).as_dict()
+    out["bayes_confirmation"] = bayes_ceiling(cs.p[cs.test])
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(out, indent=1, sort_keys=True) + "\n")
     return out
@@ -390,15 +424,18 @@ def best_eligible(stage_b_records: list[dict]) -> dict | None:
     return max(eligible, key=lambda r: r["probe"]["heldout"], default=None)
 
 
-def stage_c_matches(stage_c_result: dict, best: dict | None) -> bool:
-    """True iff `stage_c_result` is Stage C of exactly this best setting, in its context.
+def stage_c_matches(stage_c_result: dict, best: dict | None, seed: int = 0) -> bool:
+    """True iff `stage_c_result` is Stage C of exactly this best setting, in its context,
+    on this run's confirmation set (`seed + CONFIRM_SEED_OFFSET`).
 
-    Anything else (a leftover stage_c.json from an earlier best, or from another
-    graph or probe set) must not be reported as the best setting's twins.
+    Anything else (a leftover stage_c.json from an earlier best, from another
+    graph or probe set, or from before the confirmation set, when the twins were
+    scored on the selection set) must not be reported as the best setting's.
     """
     return (best is not None and bool(stage_c_result)
             and stage_c_result.get("key") == best["key"]
-            and stage_c_result.get("context") == best.get("context"))
+            and stage_c_result.get("context") == best.get("context")
+            and stage_c_result.get("confirm_seed") == seed + CONFIRM_SEED_OFFSET)
 
 
 def unprobed_passers(stage_a_records: list[dict], stage_b_records: list[dict]) -> int:
@@ -413,37 +450,76 @@ def unprobed_passers(stage_a_records: list[dict], stage_b_records: list[dict]) -
 
 
 def verdict(stage_a_records: list[dict], stage_b_records: list[dict], stage_c_result: dict,
-            one_hot: dict, bayes: float) -> dict:
+            one_hot: dict, bayes: float, seed: int = 0) -> dict:
+    """The gate: the best eligible setting (selected on Stage B) must reach GATE on the
+    independent confirmation set (Stage C). Without a matching Stage C there is no pass.
+
+    `one_hot` and `bayes` are the selection set's; they stand in as the controls only
+    while Stage C is missing (`controls_set: "selection"`). Once it matches, every
+    control is the confirmation set's (`controls_set: "confirmation"`).
+    """
     best = best_eligible(stage_b_records)
-    twins = stage_c_result if stage_c_matches(stage_c_result, best) else {}
+    confirmed = stage_c_matches(stage_c_result, best, seed)
+    c = stage_c_result if confirmed else {}
+    if confirmed:
+        controls = {"one_hot": c["one_hot_confirmation"], "bayes_ceiling": c["bayes_confirmation"],
+                    "rewired": c["rewired"], "sign_shuffled": c["sign_shuffled"]}
+    else:
+        controls = {"one_hot": one_hot, "bayes_ceiling": bayes}
     return {
         "gate": GATE,
-        "pass": bool(best is not None and best["probe"]["heldout"] >= GATE),
+        "pass": bool(confirmed and c["confirmation"]["heldout"] >= GATE),
+        "confirmed": confirmed,
         "best": best,
+        # the max over every eligible Stage B score: optimistic, never the gate
+        "selection_heldout": best["probe"]["heldout"] if best is not None else None,
+        "selection_pool": sum(1 for r in stage_b_records if r.get("passed")),
+        "confirmation": c.get("confirmation"),
+        "seed": seed,
+        "confirm_seed": seed + CONFIRM_SEED_OFFSET,
         "stage_a": {"screened": len(stage_a_records),
                     "passed": sum(r["passed"] for r in stage_a_records)},
         "stage_b_probed": len(stage_b_records),
         # nonzero: a FAIL is inconclusive, because spec §3.0 ranks every passer
         "dropped_by_cap": unprobed_passers(stage_a_records, stage_b_records),
-        "controls": {"one_hot": one_hot, "bayes_ceiling": bayes, **{
-            k: v for k, v in twins.items() if k in ("rewired", "sign_shuffled")}},
+        "controls_set": "confirmation" if confirmed else "selection",
+        "controls": controls,
     }
 
 
-def verdict_line(v: dict, cap: int | None = None) -> str:
-    """The run's last line, e.g. `VERDICT: PASS (best held-out 0.753)`.
+def verdict_status(v: dict) -> str:
+    """PASS, FAIL, or PENDING: a best setting exists but has no confirmation yet."""
+    if v["pass"]:
+        return "PASS"
+    return "PENDING" if v.get("best") and not v.get("confirmed") else "FAIL"
 
+
+def verdict_line(v: dict, cap: int | None = None) -> str:
+    """The run's last line, e.g.
+    `VERDICT: PASS (confirmation held-out 0.741; selected from 126 probed at 0.753)`.
+
+    With no confirmation yet it is `VERDICT: PENDING (...; run --stage c to confirm)`.
     Whenever a cap is in force, or the verdict left a passer unprobed, the line
     says how many passers the gate never saw. A FAIL in that state is flagged
     as not the protocol's verdict.
     """
-    parts = [f"best held-out {v['best']['probe']['heldout']:.3f}" if v["best"]
-             else "no eligible setting"]
+    status, best = verdict_status(v), v["best"]
+    parts = []
+    if best is None:
+        parts.append("no eligible setting")
+    else:
+        if v.get("confirmation"):
+            parts.append(f"confirmation held-out {v['confirmation']['heldout']:.3f}")
+        selection = v.get("selection_heldout", best["probe"]["heldout"])
+        parts.append(f"selected from {v.get('selection_pool', v.get('stage_b_probed'))} probed "
+                     f"at {selection:.3f}")
     dropped = v.get("dropped_by_cap", 0)
     if cap is not None or dropped:
         parts.append(f"{dropped} Stage A passer(s) not probed in Stage B"
                      + (f" (--cap {cap})" if cap is not None else ""))
-        if dropped and not v["pass"]:
+        if dropped and status == "FAIL":
             parts.append("so this FAIL is not the protocol's verdict: "
                          "rerun Stage B without --cap to probe every passer")
-    return f"VERDICT: {'PASS' if v['pass'] else 'FAIL'} ({'; '.join(parts)})"
+    if status == "PENDING":
+        parts.append("run --stage c to confirm")
+    return f"VERDICT: {status} ({'; '.join(parts)})"
