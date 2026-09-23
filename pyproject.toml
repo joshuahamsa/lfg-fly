@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lfg-fly"
+version = "0.0.1"
+description = "A MaleCNS fruit-fly connectome that dresses its own LFG NFT"
+requires-python = ">=3.10,<3.11"
+license = { text = "MIT" }
+dependencies = [
+  "torch==2.5.1",
+  "numpy==2.2.6",
+  "pandas==2.3.3",
+  "pyarrow==25.0.1",
+  "pillow>=10",
+  "pyyaml>=6",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[project.scripts]
+fly = "lfg_fly.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["lfg_fly*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
