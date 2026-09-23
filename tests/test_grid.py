@@ -286,6 +286,37 @@ def test_verdict_gates_on_the_confirmation_set_not_the_selection_score():
     assert G.verdict_line(v) == "VERDICT: FAIL (no eligible setting)"
 
 
+def test_pre_confirmation_verdict_json_reads_as_pending_not_pass(tmp_path):
+    """A verdict.json written before Task 11b has `pass` computed from the selection score
+    alone (`best["probe"]["heldout"] >= GATE`) and carries no `confirmed`/`confirmation` key.
+    Both `verdict_status` and `fly report` (which trusts verdict.json as written, never
+    recomputing it) must read that shape as PENDING, never as the selection-inflated PASS
+    Task 11b exists to remove."""
+    best = _row("k1", "nose", 0.63, True)
+    pre_11b_verdict = {
+        "gate": G.GATE,
+        "pass": True,  # pre-11b: best["probe"]["heldout"] >= GATE, no confirmation involved
+        "best": best,
+        "stage_a": {"screened": 1, "passed": 1},
+        "stage_b_probed": 1,
+        "dropped_by_cap": 0,
+        "controls": {"one_hot": {"heldout": 0.77}, "bayes_ceiling": 0.84},
+        "context": "ctx1",
+    }
+    assert "confirmed" not in pre_11b_verdict and "confirmation" not in pre_11b_verdict
+    assert G.verdict_status(pre_11b_verdict) == "PENDING"
+
+    (tmp_path / "stage_a.jsonl").write_text(json.dumps(
+        {"key": "k1", "context": "ctx1", "passed": True, "setting": best["setting"]}) + "\n")
+    (tmp_path / "stage_b.jsonl").write_text(json.dumps(best) + "\n")
+    (tmp_path / "verdict.json").write_text(json.dumps(pre_11b_verdict))
+    md = tmp_path / "PHASE0.md"
+    R.write_report(tmp_path, md)
+    text = md.read_text()
+    assert "**Verdict: PENDING**" in text
+    assert "**Verdict: PASS**" not in text
+
+
 def test_stage_c_matches_requires_this_runs_confirmation_seed():
     best = _row("k1", "nose", 0.7, True)
     c = _stage_c(best, 0.65)

@@ -488,8 +488,13 @@ def verdict(stage_a_records: list[dict], stage_b_records: list[dict], stage_c_re
 
 
 def verdict_status(v: dict) -> str:
-    """PASS, FAIL, or PENDING: a best setting exists but has no confirmation yet."""
-    if v["pass"]:
+    """PASS, FAIL, or PENDING: a best setting exists but has no confirmation yet.
+
+    Requires `confirmed` itself, not just `pass`: a verdict.json written by
+    pre-confirmation-set code has `pass` computed from the selection score alone
+    and no `confirmed` key, and must never read as PASS here.
+    """
+    if v["pass"] and v.get("confirmed"):
         return "PASS"
     return "PENDING" if v.get("best") and not v.get("confirmed") else "FAIL"
 
