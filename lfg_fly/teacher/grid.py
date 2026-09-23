@@ -5,17 +5,25 @@
 - Stage B: the full planted-taste probe for Stage A passers, capped at the
   `cap` smoothest. When nothing passes, the smoothest settings are probed
   anyway, flagged `passed: False` and ineligible for the gate.
+  Every probed setting also gets per-slot decodability, so the report can say
+  which input code carries identity even when nothing passes the gate.
 - Stage C: the best eligible setting's rewired and sign-shuffled twins, plus
   per-slot decodability.
 
 Every stage appends JSON lines, keyed by `Setting.key()`, so a killed run
-resumes where it stopped.
+resumes where it stopped. Every record is stamped with the run's context
+fingerprint (graph, threshold, probe-set size, seed, catalog), and resume
+reuses only records from the same context: a rebuilt graph or a different
+`--min-syn` / `--pairs` never inherits stale numbers.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
 import math
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,6 +40,8 @@ from lfg_fly.teacher.sample import base_look, near_variant
 
 GATE = 0.60
 BATCH_COLUMNS = 512  # looks x trials per GPU batch (8 GB card, N = 165k)
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -83,14 +93,78 @@ class Context:
     seed: int = 0
 
 
+def context_fingerprint(ctx: Context) -> str:
+    """What every Stage A/B/C number depends on besides the setting itself.
+
+    A short hex digest over the graph hash, its synapse threshold, the probe-set
+    size, the seed and the catalog's canonical JSON. Resume reuses only records
+    stamped with the current fingerprint.
+    """
+    payload = {
+        "graph_hash": ctx.graph.graph_hash(),
+        "min_syn": int(ctx.graph.min_syn),
+        "pairs": len(ctx.probe_set.y),
+        "seed": int(ctx.seed),
+        "catalog": hashlib.sha256(ctx.catalog.to_json().encode()).hexdigest(),
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]
+
+
 def read_jsonl(path: Path) -> list[dict]:
+    """Read JSON lines. A killed append leaves a truncated last line: that one is
+    skipped with a warning. Any other unparsable line raises."""
     if not path.exists():
         return []
-    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    lines = [line for line in path.read_text().splitlines() if line.strip()]
+    out = []
+    for i, line in enumerate(lines):
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            if i != len(lines) - 1:
+                raise
+            log.warning("%s: skipping a truncated last line (%d chars)", path, len(line))
+    return out
+
+
+def current_records(path: Path, context: str | None) -> list[dict]:
+    """The records in `path` stamped with `context`; the rest are counted and ignored."""
+    records = read_jsonl(path)
+    kept = [r for r in records if r.get("context") == context]
+    if len(kept) != len(records):
+        log.warning("%s: ignored %d record(s) from a different context (current %s)",
+                    path, len(records) - len(kept), context)
+    return kept
+
+
+def _repair_tail(path: Path) -> None:
+    """A killed append can leave a last line with no newline. Appending after it
+    would glue the next record onto it, so drop it if it's a fragment (or end it
+    if it's a whole record) first."""
+    if not path.exists():
+        return
+    with open(path, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        if f.tell() == 0:
+            return
+        f.seek(-1, os.SEEK_END)
+        if f.read(1) == b"\n":
+            return
+    data = path.read_bytes()
+    head, sep, tail = data.rpartition(b"\n")
+    try:
+        json.loads(tail)
+        data += b"\n"
+    except ValueError:
+        log.warning("%s: dropping a truncated last line (%d bytes) before appending",
+                    path, len(tail))
+        data = head + sep
+    path.write_bytes(data)
 
 
 def _append(path: Path, record: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    _repair_tail(path)
     with open(path, "a") as f:
         f.write(json.dumps(record, sort_keys=True) + "\n")
 
@@ -149,7 +223,8 @@ def _sense_checks(ctx, sim, setting, rng, images_cache) -> dict:
 
 def stage_a(ctx: Context, settings: list[Setting], out_path: Path, n: int = 32,
             sim: Simulator | None = None) -> list[dict]:
-    done = {r["key"]: r for r in read_jsonl(out_path)}
+    context = context_fingerprint(ctx)
+    done = {r["key"]: r for r in current_records(out_path, context)}
     sim = sim or Simulator(ctx.graph, ctx.pops.sensory_any, ctx.pops.readout, ctx.device)
     records = []
     for setting in settings:
@@ -177,8 +252,8 @@ def stage_a(ctx: Context, settings: list[Setting], out_path: Path, n: int = 32,
         smooth = {**d, "ok": P.smooth_ok(d["min"], d["slot"], d["full"])}
         senses = _sense_checks(ctx, sim, setting, rng, cache)
         activity = P.activity_ok(stats["max_step_frac"], stats["readout_active_frac"])
-        rec = {"key": key, "setting": setting.as_dict(), "stats": stats, "smooth": smooth,
-               "senses": senses, "activity_ok": activity,
+        rec = {"key": key, "context": context, "setting": setting.as_dict(), "stats": stats,
+               "smooth": smooth, "senses": senses, "activity_ok": activity,
                "passed": bool(activity and smooth["ok"] and all(senses.values())),
                "seconds": round(time.time() - t0, 2)}
         _append(out_path, rec)
@@ -196,8 +271,21 @@ def _setting_from(rec: dict) -> Setting:
     return Setting(BrainParams(**d["brain"]), d["code"], d["g_in"])
 
 
+def _look_train_mask(ps) -> np.ndarray:
+    """Looks that appear in a training pair; the rest are the held-out looks."""
+    look_train = np.zeros(len(ps.looks), bool)
+    look_train[np.unique(np.concatenate([ps.a_idx[~ps.test], ps.b_idx[~ps.test]]))] = True
+    return look_train
+
+
 def stage_b(ctx: Context, records: list[dict], out_path: Path, cap: int = 24,
             probe_all: bool = False, sim: Simulator | None = None) -> list[dict]:
+    context = context_fingerprint(ctx)
+    stale = [r for r in records if r.get("context") != context]
+    if stale:
+        log.warning("stage B: ignored %d Stage A record(s) from a different context (current %s)",
+                    len(stale), context)
+        records = [r for r in records if r.get("context") == context]
     passed = [r for r in records if r["passed"]]
     if probe_all:
         pool = list(records)
@@ -207,9 +295,10 @@ def stage_b(ctx: Context, records: list[dict], out_path: Path, cap: int = 24,
         pool = sorted(records, key=_smooth_ratio)[:6]
     chosen = sorted(pool, key=_smooth_ratio)[:cap]
     dropped = len(pool) - len(chosen)
-    done = {r["key"]: r for r in read_jsonl(out_path)}
+    done = {r["key"]: r for r in current_records(out_path, context)}
     sim = sim or Simulator(ctx.graph, ctx.pops.sensory_any, ctx.pops.readout, ctx.device)
     ps, cache, out = ctx.probe_set, {}, []
+    look_train = _look_train_mask(ps)
     for rec in chosen:
         if rec["key"] in done:
             out.append(done[rec["key"]])
@@ -217,9 +306,10 @@ def stage_b(ctx: Context, records: list[dict], out_path: Path, cap: int = 24,
         t0 = time.time()
         X, stats = features_for(ctx, sim, _setting_from(rec), ps.looks, cache)
         result = P.evaluate(X, ps, device=ctx.device, seed=ctx.seed)
-        row = {"key": rec["key"], "setting": rec["setting"], "passed": rec["passed"],
-               "probe": result.as_dict(), "stats": stats, "dropped_by_cap": dropped,
-               "seconds": round(time.time() - t0, 2)}
+        decodability = P.per_slot_decodability(X, ps.looks, ctx.catalog, look_train, ctx.device)
+        row = {"key": rec["key"], "context": context, "setting": rec["setting"],
+               "passed": rec["passed"], "probe": result.as_dict(), "decodability": decodability,
+               "stats": stats, "dropped_by_cap": dropped, "seconds": round(time.time() - t0, 2)}
         _append(out_path, row)
         out.append(row)
     return out
@@ -229,7 +319,7 @@ def stage_c(ctx: Context, best: dict, out_path: Path) -> dict:
     from lfg_fly.teacher.rewire import rewired_graph, sign_shuffled_graph
 
     setting = _setting_from(best)
-    ps, out = ctx.probe_set, {"key": best["key"]}
+    ps, out = ctx.probe_set, {"key": best["key"], "context": context_fingerprint(ctx)}
     rewired, repairs = rewired_graph(ctx.graph, seed=ctx.seed + 11, device=ctx.device)
     twins = (("rewired", rewired),
              ("sign_shuffled", sign_shuffled_graph(ctx.graph, ctx.seed + 13)))
@@ -241,19 +331,34 @@ def stage_c(ctx: Context, best: dict, out_path: Path) -> dict:
     out["rewire_repairs"] = repairs
     sim = Simulator(ctx.graph, ctx.pops.sensory_any, ctx.pops.readout, ctx.device)
     X, _ = features_for(ctx, sim, setting, ps.looks, {})
-    look_train = np.zeros(len(ps.looks), bool)
-    look_train[np.unique(np.concatenate([ps.a_idx[~ps.test], ps.b_idx[~ps.test]]))] = True
-    out["decodability"] = P.per_slot_decodability(X, ps.looks, ctx.catalog, look_train,
-                                                  ctx.device)
+    out["decodability"] = P.per_slot_decodability(X, ps.looks, ctx.catalog,
+                                                  _look_train_mask(ps), ctx.device)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(out, indent=1, sort_keys=True) + "\n")
     return out
 
 
+def best_eligible(stage_b_records: list[dict]) -> dict | None:
+    """The gate's candidate: the eligible Stage B row with the highest held-out."""
+    eligible = [r for r in stage_b_records if r.get("passed")]
+    return max(eligible, key=lambda r: r["probe"]["heldout"], default=None)
+
+
+def stage_c_matches(stage_c_result: dict, best: dict | None) -> bool:
+    """True iff `stage_c_result` is Stage C of exactly this best setting, in its context.
+
+    Anything else (a leftover stage_c.json from an earlier best, or from another
+    graph or probe set) must not be reported as the best setting's twins.
+    """
+    return (best is not None and bool(stage_c_result)
+            and stage_c_result.get("key") == best["key"]
+            and stage_c_result.get("context") == best.get("context"))
+
+
 def verdict(stage_a_records: list[dict], stage_b_records: list[dict], stage_c_result: dict,
             one_hot: dict, bayes: float) -> dict:
-    eligible = [r for r in stage_b_records if r.get("passed")]
-    best = max(eligible, key=lambda r: r["probe"]["heldout"], default=None)
+    best = best_eligible(stage_b_records)
+    twins = stage_c_result if stage_c_matches(stage_c_result, best) else {}
     return {
         "gate": GATE,
         "pass": bool(best is not None and best["probe"]["heldout"] >= GATE),
@@ -262,5 +367,5 @@ def verdict(stage_a_records: list[dict], stage_b_records: list[dict], stage_c_re
                     "passed": sum(r["passed"] for r in stage_a_records)},
         "stage_b_probed": len(stage_b_records),
         "controls": {"one_hot": one_hot, "bayes_ceiling": bayes, **{
-            k: v for k, v in stage_c_result.items() if k in ("rewired", "sign_shuffled")}},
+            k: v for k, v in twins.items() if k in ("rewired", "sign_shuffled")}},
     }

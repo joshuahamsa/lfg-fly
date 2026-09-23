@@ -92,6 +92,7 @@ def _load_context(args: argparse.Namespace):
 
 def _cmd_grid(args: argparse.Namespace) -> int:
     import json
+    import logging
 
     from lfg_fly import env, paths
     from lfg_fly.teacher import grid as G
@@ -99,24 +100,39 @@ def _cmd_grid(args: argparse.Namespace) -> int:
     from lfg_fly.teacher.sample import bayes_ceiling
 
     env.configure_libraries()
+    logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
     ctx = _load_context(args)
+    context = G.context_fingerprint(ctx)
+    print(f"context {context}")
     out = paths.repo_root() / "data" / "probe"
-    a = G.read_jsonl(out / "stage_a.jsonl")
+    # records from another context (graph, --min-syn, --pairs, seed, catalog) are never reused
     if args.stage in ("a", "all"):
         a = G.stage_a(ctx, G.default_grid(), out / "stage_a.jsonl")
         print(f"stage A: {sum(r['passed'] for r in a)}/{len(a)} passed")
-    b = G.read_jsonl(out / "stage_b.jsonl")
+    else:
+        a = G.current_records(out / "stage_a.jsonl", context)
     if args.stage in ("b", "all"):
         b = G.stage_b(ctx, a, out / "stage_b.jsonl", cap=args.cap)
         print(f"stage B: probed {len(b)}")
+    else:
+        b = G.current_records(out / "stage_b.jsonl", context)
     c_path = out / "stage_c.json"
     c = json.loads(c_path.read_text()) if c_path.exists() else {}
-    eligible = [r for r in b if r["passed"]]
-    if args.stage in ("c", "all") and eligible:
-        c = G.stage_c(ctx, max(eligible, key=lambda r: r["probe"]["heldout"]), c_path)
+    best = G.best_eligible(b)
+    if best is not None and not G.stage_c_matches(c, best):
+        if args.stage in ("c", "all"):
+            c = G.stage_c(ctx, best, c_path)
+            print(f"stage C: twins of the best (rewired {c['rewired']['heldout']:.3f}, "
+                  f"sign-shuffled {c['sign_shuffled']['heldout']:.3f})")
+        else:
+            print("stage C: stage_c.json is not the current best setting's (or context's); "
+                  "its twins are left out of the verdict until `--stage c` reruns it")
+    elif best is not None and args.stage in ("c", "all"):
+        print("stage C: stage_c.json already covers the best setting in this context; reused")
     ps = ctx.probe_set
     one_hot = P.evaluate(P.one_hot(ps.looks, ctx.catalog), ps, device=args.device).as_dict()
     v = G.verdict(a, b, c, one_hot, bayes_ceiling(ps.p[ps.test]))
+    v["context"] = context
     v["graph_hash"] = ctx.graph.graph_hash()
     v["catalog_values"] = {slot: len(vals) for slot, vals in ctx.catalog.values.items()}
     out.mkdir(parents=True, exist_ok=True)  # `--stage b|c` on a fresh checkout wrote nothing yet
