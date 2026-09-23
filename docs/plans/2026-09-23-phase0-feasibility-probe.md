@@ -37,6 +37,7 @@
   | ORNs | 2,635 in 53 glomeruli |
   | Brain sensory neurons (`ol_sensory` 4,114 + `cb_sensory` 4,868) | 8,982 |
   | `vnc_sensory` neurons | 6,365 |
+  | `sensory_any` (brain + VNC sensory; no tonic bias) | 15,347 |
   | Traced bodies with no NT row | 502 |
 - **Pinned LFG commit** for `trait_config.yaml`: `0415a63afdcea11156b57169d34e38bb8d377adc`.
 - **Gate:** the best setting that passes all constraints reaches **held-out ≥ 0.60** on the planted taste.
@@ -979,7 +980,9 @@ def populations(g: Graph) -> Populations:
         orn_glomerulus=np.char.replace(t[orn], "ORN_", "", count=1),
         sensory_brain=np.flatnonzero(np.isin(sc, BRAIN_SENSORY)),
         sensory_vnc=np.flatnonzero(np.isin(sc, VNC_SENSORY)),
-        sensory_any=np.char.find(sc, "sensory") >= 0,
+        # exactly the superclasses an input code can drive; everything else gets the tonic bias
+        # (a substring match would also catch sensory_ascending/_descending/*_tbc: 565 neurons on v1.0)
+        sensory_any=np.isin(sc, BRAIN_SENSORY + VNC_SENSORY),
     )
 ```
 
@@ -3604,7 +3607,8 @@ c = C.load_columns(paths.graph_dir() / "columns-syn3.npz")
 facts = {"neurons": (g.n, 165_122), "edges>=3": (len(g.col), 10_511_038), "readout": (len(p.readout), 2_129),
          "photoreceptors": (len(p.photoreceptor), 4_107), "orn": (len(p.orn), 2_635),
          "glomeruli": (len(np.unique(p.orn_glomerulus)), 53), "sensory_brain": (len(p.sensory_brain), 8_982),
-         "sensory_vnc": (len(p.sensory_vnc), 6_365), "nt_missing": (g.nt_missing, 502)}
+         "sensory_vnc": (len(p.sensory_vnc), 6_365), "sensory_any": (int(p.sensory_any.sum()), 15_347),
+         "nt_missing": (g.nt_missing, 502)}
 for k, (got, want) in facts.items():
     print(f"{k}: {got} (expected {want})", "OK" if got == want else "MISMATCH")
 print("columns assigned", c.total - c.dropped, "/", c.total, "(review measured 3,936)")
