@@ -42,6 +42,16 @@ tables are in [`docs/PHASE0.md`](docs/PHASE0.md), raw results in [`data/probe/`]
   (11%): a ~28×29 compound eye sees big regions, not fine features. Odour codes carry the
   fine slots.
 
+**These numbers have about ±0.006 of run-to-run noise.** Phase 0 was run before the
+simulator was deterministic on the GPU. torch's sparse matmul (cuSPARSE) sums in a different
+order on every run, so simulating the best setting twice gave readout features that differed
+by up to ~4e-7, and the readout fit turned that into held-out scores between 0.750 and 0.762.
+The stored 0.758 (confirmation) and 0.760 (selection) are single draws from that spread, and so
+are the rewired and sign-shuffled twins' scores. The no-brain and Bayes rows involve no
+simulation. The committed results have not been rerun. The simulator now uses its own CSR
+kernel ([`lfg_fly/brain/spmm.py`](lfg_fly/brain/spmm.py)), so repeated runs on one GPU give
+bit-identical features.
+
 **What Phase 0 does not answer:** the taste was *additive*, and for an additive task a model
 on the plain trait list is already the right tool. Whether the connectome captures trait
 **interactions** better than a plain model is the open question. That is where "an unexpected
