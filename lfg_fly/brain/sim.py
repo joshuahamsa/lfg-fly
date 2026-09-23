@@ -1,6 +1,7 @@
 """Candidate brains on the connectome (spec §2, Candidate brains).
 
-All kinds share: dt = 1 ms, the integer CSR (syn = (W_int @ x) * (1/insum)),
+All kinds share: dt = 1 ms, the integer CSR (syn = (W_int @ x) * (1/insum),
+bit-reproducible run to run on CUDA too, via brain/spmm.py),
 a tonic bias on every NON-sensory neuron, and a cached resting state reached by
 a noise-free burn-in under `rest_drive` (the mid-grey retina, no odour).
 """
@@ -13,6 +14,7 @@ from dataclasses import asdict, dataclass
 import numpy as np
 import torch
 
+from lfg_fly.brain.spmm import CudaCsr
 from lfg_fly.connectome.build import Graph
 
 BRAIN_KINDS = ("lif", "lif-avg", "lif-volley", "rate")
@@ -67,12 +69,16 @@ class Simulator:
                  device: str = "cuda"):
         self.n = g.n
         self.device = device
-        self.W = torch.sparse_csr_tensor(
-            torch.as_tensor(g.crow, dtype=torch.int64),
-            torch.as_tensor(g.col, dtype=torch.int64),
-            torch.as_tensor(g.ival, dtype=torch.float32),
-            size=(g.n, g.n),
-        ).to(device)
+        if torch.device(device).type == "cuda":
+            # torch's CUDA CSR matmul (cuSPARSE) is not bit-reproducible; see brain/spmm.py
+            self.W = CudaCsr(g.crow, g.col, g.ival, (g.n, g.n), device)
+        else:
+            self.W = torch.sparse_csr_tensor(
+                torch.as_tensor(g.crow, dtype=torch.int64),
+                torch.as_tensor(g.col, dtype=torch.int64),
+                torch.as_tensor(g.ival, dtype=torch.float32),
+                size=(g.n, g.n),
+            )
         self.scale = torch.as_tensor(
             (1.0 / g.insum).astype(np.float32), device=device).unsqueeze(1)
         self.nonsensory = torch.as_tensor(

@@ -101,3 +101,24 @@ def test_concentration_scales_identity_drive():
     assert torch.allclose(hi[ident] - 0.0, 2 * (lo[ident] - 0.0))
     with pytest.raises(ValueError):
         Z.InputBuilder("smell-o-vision", 20, pops, retina, g_in=1.0, device="cpu")
+
+
+@pytest.mark.parametrize("device", [
+    "cpu",
+    pytest.param("cuda", marks=pytest.mark.skipif(not torch.cuda.is_available(),
+                                                  reason="needs CUDA")),
+])
+def test_drive_is_bit_identical_across_builds(device):
+    # 9 slots x 14 neurons drawn from a 15-neuron pool: every look piles several codes onto
+    # the same neurons, three of them on top of the retina's grey baseline, which is where a
+    # scatter-add's summation order would show. (Measured on CUDA: index_put_ with
+    # accumulate=True sorts its indices, stably, so the order is fixed there too.)
+    pops, retina = _pops(), _retina()
+    rng = np.random.default_rng(0)
+    looks = [tuple(f"v{rng.integers(40)}" for _ in Z.SLOTS) for _ in range(64)]
+    conc = rng.uniform(0.3, 1.0, (64, len(Z.SLOTS))).astype(np.float32)
+    first = Z.InputBuilder("all-sensory+vnc", 20, pops, retina, 2.0, device).drive(looks, conc=conc)
+    for _ in range(5):
+        again = Z.InputBuilder("all-sensory+vnc", 20, pops, retina, 2.0, device).drive(looks,
+                                                                                     conc=conc)
+        assert torch.equal(first, again)
