@@ -137,9 +137,7 @@ def _cmd_grid(args: argparse.Namespace) -> int:
     v["catalog_values"] = {slot: len(vals) for slot, vals in ctx.catalog.values.items()}
     out.mkdir(parents=True, exist_ok=True)  # `--stage b|c` on a fresh checkout wrote nothing yet
     (out / "verdict.json").write_text(json.dumps(v, indent=1, sort_keys=True) + "\n")
-    best = (f" (best held-out {v['best']['probe']['heldout']:.3f})" if v["best"]
-            else " (no eligible setting)")
-    print(f"VERDICT: {'PASS' if v['pass'] else 'FAIL'}" + best)
+    print(G.verdict_line(v, args.cap))
     return 0
 
 
@@ -178,7 +176,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--device", default="cuda")
     p.add_argument("--min-syn", type=int, default=3)
     p.add_argument("--pairs", type=int, default=3000)
-    p.add_argument("--cap", type=int, default=24)
+    p.add_argument("--cap", type=int, default=None,
+                   help="probe at most N Stage A passers in Stage B (default: every passer, as "
+                        "spec §3.0 requires; a cap is disclosed in verdict.json and on the "
+                        "VERDICT line, and it makes a FAIL inconclusive)")
     p.add_argument("--stage", choices=["a", "b", "c", "all"], default="all")
     p.set_defaults(func=_cmd_grid)
 

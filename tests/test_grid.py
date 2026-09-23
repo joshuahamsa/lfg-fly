@@ -1,16 +1,18 @@
 import dataclasses
 import json
 import logging
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from lfg_fly.brain.senses import SLOTS, Retina
+from lfg_fly.brain.senses import CODE_NAMES, SLOTS, Retina
 from lfg_fly.brain.sim import BrainParams
 from lfg_fly.connectome import build as B
 from lfg_fly.connectome.neurons import populations
 from lfg_fly.teacher import grid as G
+from lfg_fly.teacher import probe as P
 from lfg_fly.teacher import report as R
 from lfg_fly.teacher import sample as T
 from lfg_fly.teacher.catalog import Catalog
@@ -224,3 +226,137 @@ def test_default_grid_covers_every_brain_and_code():
                                       "all-sensory+vnc"}
     assert len({s.key() for s in grid}) == len(grid)
     json.dumps([s.as_dict() for s in grid])
+
+
+def _a_rec(kind, code, g_syn, d_min, context="ctx1", activity=True, senses=True):
+    """A Stage A record with slot / full distances 5 / 9: smooth iff d_min <= 0.5."""
+    extra = {"steps": 6} if kind == "lif-volley" else {}
+    s = G.Setting(BrainParams(kind=kind, g_syn=float(g_syn), bias=0.0, **extra), code, 2.0)
+    smooth = {"min": d_min, "slot": 5.0, "full": 9.0, "ok": P.smooth_ok(d_min, 5.0, 9.0)}
+    return {"key": s.key(), "context": context, "setting": s.as_dict(), "smooth": smooth,
+            "activity_ok": activity, "senses": {"nose": senses},
+            "passed": bool(activity and smooth["ok"] and senses)}
+
+
+def _strata(recs):
+    return [(r["setting"]["brain"]["kind"], r["setting"]["code"]) for r in recs]
+
+
+def _tied_and_others(context="ctx1"):
+    """The real-graph shape: many deterministic spiking passers whose +0.01 flips no
+    spike (d_min == 0, so d_min/d_slot ties at 0), listed first as grid order does."""
+    tied = [_a_rec("lif-volley", "nose", g, 0.0, context) for g in range(1, 31)]
+    others = ([_a_rec("lif-volley", "all-sensory+vnc", g, 0.0, context) for g in (1, 2)]
+              + [_a_rec("rate", "nose", g, 0.2, context) for g in (1, 2)]
+              + [_a_rec("rate", "all-sensory+vnc", g, 0.3, context) for g in (1, 2)])
+    failed = [_a_rec("rate", "eyes", 1, 0.0, context, activity=False)]
+    return tied, others, failed
+
+
+def test_stage_b_probes_every_passer_and_zero_ties_never_crowd_out_a_cap():
+    tied, others, failed = _tied_and_others()
+    passers = {r["key"] for r in tied + others}
+    chosen, dropped = G.stage_b_selection(tied + others + failed)
+    assert {r["key"] for r in chosen} == passers and dropped == 0  # spec §3.0: every passer
+    # the old smoothest-first cap of 4 kept four tied nose lif-volley settings: no rate, no
+    # all-sensory. A stratified cap takes every (kind, code) once before any twice.
+    chosen, dropped = G.stage_b_selection(tied + others + failed, cap=4)
+    assert _strata(chosen) == [("lif-volley", "nose"), ("lif-volley", "all-sensory+vnc"),
+                               ("rate", "nose"), ("rate", "all-sensory+vnc")]
+    assert dropped == len(passers) - 4
+    chosen, _ = G.stage_b_selection(tied + others + failed, cap=8)
+    assert sorted(set(_strata(chosen))) == sorted(set(_strata(tied + others)))
+    assert _strata(chosen).count(("lif-volley", "nose")) == 2  # round-robin, not 5 ties first
+    with pytest.raises(ValueError):
+        G.stage_b_selection(tied, cap=0)
+
+
+def test_stage_b_fallback_prefers_fewest_failed_checks_one_per_stratum():
+    # silent spiking settings: d_min == 0 is "smooth", but no activity and no sense change
+    silent = [_a_rec("lif", "nose", g, 0.0, activity=False, senses=False) for g in range(1, 21)]
+    rough = [_a_rec("rate", code, 1.0, 0.9) for code in CODE_NAMES]  # fail smoothness only
+    records = silent + rough
+    assert not any(r["passed"] for r in records)
+    chosen, dropped = G.stage_b_selection(records)
+    assert len(chosen) == G.FALLBACK_PROBES and dropped == 0
+    assert _strata(chosen) == [("rate", c) for c in CODE_NAMES] + [("lif", "nose")]
+    assert chosen[-1]["key"] == silent[0]["key"]
+
+
+def _fake_probe(monkeypatch, good=("rate", "all-sensory+vnc")):
+    """Stage B's GPU work replaced: `good` settings score 0.75 held-out, the rest 0.52."""
+    seen = []
+
+    def features(ctx, sim, setting, looks, images_cache=None, **kw):
+        seen.append(setting)
+        stats = {"active_frac": 0.2, "readout_active_frac": 0.2, "max_step_frac": 0.05}
+        return np.zeros((len(looks), 1), np.float32), stats
+
+    def evaluate(X, ps, device="cpu", seed=0):
+        h = 0.75 if (seen[-1].brain.kind, seen[-1].code) == good else 0.52
+        return SimpleNamespace(as_dict=lambda: {"heldout": h, "ci_lo": h - 0.03,
+                                                "ci_hi": h + 0.03})
+
+    monkeypatch.setattr(G, "features_for", features)
+    monkeypatch.setattr(G.P, "evaluate", evaluate)
+    monkeypatch.setattr(G.P, "per_slot_decodability", lambda *a, **k: _dec(0.5))
+
+
+def _write_results(d, a, b, v):
+    d.mkdir()
+    (d / "stage_a.jsonl").write_text("".join(json.dumps(r) + "\n" for r in a))
+    (d / "stage_b.jsonl").write_text("".join(json.dumps(r) + "\n" for r in b))
+    (d / "verdict.json").write_text(json.dumps(v))
+
+
+def test_uncapped_stage_b_finds_the_passing_setting_and_a_cap_is_disclosed(tmp_path,
+                                                                          monkeypatch):
+    ctx = _toy_context(tmp_path, feedforward=True)
+    context = G.context_fingerprint(ctx)
+    tied, others, failed = _tied_and_others(context)
+    a = tied + others + failed
+    _fake_probe(monkeypatch)
+
+    b = G.stage_b(ctx, a, tmp_path / "b.jsonl", sim=object())  # default: no cap
+    assert {r["key"] for r in b} == {r["key"] for r in tied + others}
+    v = {**G.verdict(a, b, {}, {"heldout": 0.77}, 0.84), "context": context}
+    assert v["pass"] is True and v["dropped_by_cap"] == 0
+    assert _strata([v["best"]]) == [("rate", "all-sensory+vnc")]
+    assert G.verdict_line(v) == "VERDICT: PASS (best held-out 0.750)"
+    _write_results(tmp_path / "full", a, b, v)
+    R.write_report(tmp_path / "full", tmp_path / "full.md")
+    text = (tmp_path / "full.md").read_text()
+    assert "**Verdict: PASS**" in text and "Incomplete" not in text
+    assert "| all-sensory+vnc | rate |" in text  # the all-sensory code is in the decodability table
+
+    # a budget cap: the gate never sees the passing setting, and everything says so
+    capped = G.stage_b(ctx, a, tmp_path / "b_cap.jsonl", cap=2, sim=object())
+    assert len(capped) == 2
+    v = {**G.verdict(a, capped, {}, {"heldout": 0.77}, 0.84), "context": context}
+    assert v["pass"] is False and v["dropped_by_cap"] == len(tied + others) - 2
+    assert json.loads(json.dumps(v))["dropped_by_cap"] == 34  # lands in verdict.json
+    line = G.verdict_line(v, cap=2)
+    assert line.startswith("VERDICT: FAIL (best held-out 0.520; 34 Stage A passer(s) not "
+                           "probed in Stage B (--cap 2); so this FAIL is not the protocol's")
+    # a later `--stage c` run (no --cap given) still discloses the unprobed passers
+    assert "34 Stage A passer(s) not probed" in G.verdict_line(v)
+    _write_results(tmp_path / "capped", a, capped, v)
+    R.write_report(tmp_path / "capped", tmp_path / "capped.md")
+    text = (tmp_path / "capped.md").read_text()
+    assert ("**Incomplete:** 34 setting(s) that passed Stage A were never probed in Stage B "
+            "(a `--cap` was used, or Stage B did not finish), so this FAIL is not the protocol's "
+            "verdict.") in text
+
+
+def test_verdict_line_names_a_cap_even_when_it_dropped_nothing():
+    v = {"pass": True, "best": {"probe": {"heldout": 0.7}}, "dropped_by_cap": 0}
+    assert G.verdict_line(v, cap=200) == ("VERDICT: PASS (best held-out 0.700; "
+                                          "0 Stage A passer(s) not probed in Stage B (--cap 200))")
+    assert G.verdict_line({"pass": False, "best": None}) == "VERDICT: FAIL (no eligible setting)"
+
+
+def test_grid_cli_probes_every_passer_by_default():
+    from lfg_fly.cli import build_parser
+
+    assert build_parser().parse_args(["grid"]).cap is None
+    assert build_parser().parse_args(["grid", "--cap", "24"]).cap == 24

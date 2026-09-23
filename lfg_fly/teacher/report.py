@@ -77,6 +77,13 @@ def write_report(results_dir: Path, out_md: Path) -> None:
     lines = ["# Phase 0: can the fly learn a taste at all?", ""]
     lines += [f"**Verdict: {'PASS' if v['pass'] else 'FAIL'}** (gate: held-out ≥ {v['gate']:.2f} "
               "on a planted additive taste, by a setting that passes every constraint).", ""]
+    dropped = v.get("dropped_by_cap", 0)
+    if dropped:  # spec §3.0 ranks every passer by held-out: a capped Stage B is partial
+        consequence = ("a better passer may exist" if v["pass"]
+                       else "this FAIL is not the protocol's verdict")
+        lines += [f"**Incomplete:** {dropped} setting(s) that passed Stage A were never probed "
+                  f"in Stage B (a `--cap` was used, or Stage B did not finish), so {consequence}. "
+                  "Rerun Stage B without `--cap` to probe every passer.", ""]
     ctl = v["controls"]
     lines += ["| Reference | Held-out |", "|---|---|",
               f"| Bayes ceiling | {ctl['bayes_ceiling']:.3f} |",
@@ -105,9 +112,6 @@ def write_report(results_dir: Path, out_md: Path) -> None:
         lines.append(f"| {s['brain']['kind']} | {s['code']} | {s['brain']['g_syn']} | "
                      f"{s['brain']['bias']} | {s['g_in']} | {'yes' if r['passed'] else 'no'} | "
                      f"{pb['heldout']:.3f} | {pb['ci_lo']:.3f}–{pb['ci_hi']:.3f} |")
-    if b and b[0].get("dropped_by_cap"):
-        lines += ["", f"Stage B cap dropped {b[0]['dropped_by_cap']} passing settings "
-                  "(smoothest kept)."]
     lines += _decodability_by_code(b)
     c_path = results_dir / "stage_c.json"
     c = json.loads(c_path.read_text()) if c_path.exists() else {}

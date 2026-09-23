@@ -2,9 +2,13 @@
 
 - Stage A: every setting simulates 32 base looks plus three perturbations, and
   must pass the activity, sense-change and smoothness checks.
-- Stage B: the full planted-taste probe for Stage A passers, capped at the
-  `cap` smoothest. When nothing passes, the smoothest settings are probed
-  anyway, flagged `passed: False` and ineligible for the gate.
+- Stage B: the full planted-taste probe for every Stage A passer (spec §3.0
+  ranks the passers by held-out accuracy, so none may be skipped). An optional
+  `cap` limits the count for a budget run. It interleaves (brain kind, input
+  code) strata, is disclosed as `dropped_by_cap` in verdict.json and on the
+  VERDICT line, and makes a FAIL inconclusive. When nothing passes, a few
+  settings (fewest failed checks, one per stratum) are probed anyway, flagged
+  `passed: False` and ineligible for the gate.
   Every probed setting also gets per-slot decodability, so the report can say
   which input code carries identity even when nothing passes the gate.
 - Stage C: the best eligible setting's rewired and sign-shuffled twins, plus
@@ -22,7 +26,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import math
 import os
 import time
 from dataclasses import dataclass
@@ -40,6 +43,7 @@ from lfg_fly.teacher.sample import base_look, near_variant
 
 GATE = 0.60
 BATCH_COLUMNS = 512  # looks x trials per GPU batch (8 GB card, N = 165k)
+FALLBACK_PROBES = 6  # ineligible settings probed for the report when nothing passes Stage A
 
 log = logging.getLogger(__name__)
 
@@ -261,9 +265,56 @@ def stage_a(ctx: Context, settings: list[Setting], out_path: Path, n: int = 32,
     return records
 
 
-def _smooth_ratio(rec: dict) -> float:
-    s = rec["smooth"]
-    return s["min"] / s["slot"] if s["slot"] > 0 else math.inf
+def _stratified(pool: list[dict]) -> list[dict]:
+    """`pool` interleaved round-robin over its (brain kind, input code) strata.
+
+    Each stratum keeps `pool`'s order, and the strata take turns in order of first
+    appearance, so any prefix covers every kind and code before any of them
+    repeats. Nothing here ranks by the smoothness ratio d_min/d_slot. A
+    deterministic spiking setting whose +0.01 perturbation flips no spike has
+    d_min == 0 exactly, and on the real graph dozens of those ties (grid order,
+    nose first) filled a smoothest-24 cap with no rate or all-sensory setting.
+    """
+    strata: dict[tuple[str, str], list[dict]] = {}
+    for rec in pool:
+        s = rec["setting"]
+        strata.setdefault((s["brain"]["kind"], s["code"]), []).append(rec)
+    out: list[dict] = []
+    for i in range(max((len(v) for v in strata.values()), default=0)):
+        out += [v[i] for v in strata.values() if i < len(v)]
+    return out
+
+
+def _checks_failed(rec: dict) -> int:
+    """How many of the three Stage A checks (activity, smoothness, senses) a record failed."""
+    return (int(not rec["activity_ok"]) + int(not rec["smooth"]["ok"])
+            + int(not all(rec["senses"].values())))
+
+
+def stage_b_selection(records: list[dict], cap: int | None = None,
+                      probe_all: bool = False) -> tuple[list[dict], int]:
+    """The Stage A records Stage B probes, and how many of the pool a cap left out.
+
+    - By default, every passer (spec §3.0: passers are ranked by held-out, so
+      the gate has to see all of them).
+    - `probe_all`: every record, eligible or not.
+    - Nothing passed: FALLBACK_PROBES ineligible settings for the report. They
+      are the fewest-failed-checks record of each stratum in turn.
+
+    `cap` truncates the stratified order: every (kind, code) stratum is taken
+    once before any is taken twice.
+    """
+    if cap is not None and cap < 1:
+        raise ValueError(f"cap must be None (probe every passer) or >= 1, got {cap}")
+    passed = [r for r in records if r["passed"]]
+    if probe_all:
+        pool = _stratified(records)
+    elif passed:
+        pool = _stratified(passed)
+    else:
+        pool = _stratified(sorted(records, key=_checks_failed))[:FALLBACK_PROBES]
+    chosen = pool if cap is None else pool[:cap]
+    return chosen, len(pool) - len(chosen)
 
 
 def _setting_from(rec: dict) -> Setting:
@@ -278,7 +329,7 @@ def _look_train_mask(ps) -> np.ndarray:
     return look_train
 
 
-def stage_b(ctx: Context, records: list[dict], out_path: Path, cap: int = 24,
+def stage_b(ctx: Context, records: list[dict], out_path: Path, cap: int | None = None,
             probe_all: bool = False, sim: Simulator | None = None) -> list[dict]:
     context = context_fingerprint(ctx)
     stale = [r for r in records if r.get("context") != context]
@@ -286,15 +337,10 @@ def stage_b(ctx: Context, records: list[dict], out_path: Path, cap: int = 24,
         log.warning("stage B: ignored %d Stage A record(s) from a different context (current %s)",
                     len(stale), context)
         records = [r for r in records if r.get("context") == context]
-    passed = [r for r in records if r["passed"]]
-    if probe_all:
-        pool = list(records)
-    elif passed:
-        pool = passed
-    else:  # nothing eligible: still probe the 6 smoothest, flagged ineligible, for the report
-        pool = sorted(records, key=_smooth_ratio)[:6]
-    chosen = sorted(pool, key=_smooth_ratio)[:cap]
-    dropped = len(pool) - len(chosen)
+    chosen, dropped = stage_b_selection(records, cap, probe_all)
+    if dropped:
+        log.warning("stage B: cap %d left %d setting(s) unprobed; the verdict discloses it",
+                    cap, dropped)
     done = {r["key"]: r for r in current_records(out_path, context)}
     sim = sim or Simulator(ctx.graph, ctx.pops.sensory_any, ctx.pops.readout, ctx.device)
     ps, cache, out = ctx.probe_set, {}, []
@@ -355,6 +401,17 @@ def stage_c_matches(stage_c_result: dict, best: dict | None) -> bool:
             and stage_c_result.get("context") == best.get("context"))
 
 
+def unprobed_passers(stage_a_records: list[dict], stage_b_records: list[dict]) -> int:
+    """Stage A passers with no Stage B row: settings the gate never saw.
+
+    Counted from the records rather than taken from a run's cap, so the number
+    stays right across resumes, a changed `--cap` and `--stage c` reruns. After a
+    full Stage B it is nonzero only when a cap was used.
+    """
+    probed = {r["key"] for r in stage_b_records}
+    return sum(1 for r in stage_a_records if r.get("passed") and r["key"] not in probed)
+
+
 def verdict(stage_a_records: list[dict], stage_b_records: list[dict], stage_c_result: dict,
             one_hot: dict, bayes: float) -> dict:
     best = best_eligible(stage_b_records)
@@ -366,6 +423,27 @@ def verdict(stage_a_records: list[dict], stage_b_records: list[dict], stage_c_re
         "stage_a": {"screened": len(stage_a_records),
                     "passed": sum(r["passed"] for r in stage_a_records)},
         "stage_b_probed": len(stage_b_records),
+        # nonzero: a FAIL is inconclusive, because spec §3.0 ranks every passer
+        "dropped_by_cap": unprobed_passers(stage_a_records, stage_b_records),
         "controls": {"one_hot": one_hot, "bayes_ceiling": bayes, **{
             k: v for k, v in twins.items() if k in ("rewired", "sign_shuffled")}},
     }
+
+
+def verdict_line(v: dict, cap: int | None = None) -> str:
+    """The run's last line, e.g. `VERDICT: PASS (best held-out 0.753)`.
+
+    Whenever a cap is in force, or the verdict left a passer unprobed, the line
+    says how many passers the gate never saw. A FAIL in that state is flagged
+    as not the protocol's verdict.
+    """
+    parts = [f"best held-out {v['best']['probe']['heldout']:.3f}" if v["best"]
+             else "no eligible setting"]
+    dropped = v.get("dropped_by_cap", 0)
+    if cap is not None or dropped:
+        parts.append(f"{dropped} Stage A passer(s) not probed in Stage B"
+                     + (f" (--cap {cap})" if cap is not None else ""))
+        if dropped and not v["pass"]:
+            parts.append("so this FAIL is not the protocol's verdict: "
+                         "rerun Stage B without --cap to probe every passer")
+    return f"VERDICT: {'PASS' if v['pass'] else 'FAIL'} ({'; '.join(parts)})"
