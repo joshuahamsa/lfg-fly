@@ -447,6 +447,13 @@ from rounding. The check becomes:
 Making the simulator deterministic is a separate task. Everything else in
 §3.0b is unchanged.
 
+**The run.** Phase 0b runs on the deterministic simulator (`443740a`,
+joshuahamsa/lfg-fly#1, which replaces cuSPARSE with our own CSR kernel on
+CUDA). Every Phase 0b number therefore reproduces bit for bit. Phase 0's
+stored numbers came from the nondeterministic simulator, so amendment 1's
+comparison with them stands as written. Calibration is rerun on this code
+too.
+
 ### 3.1 Looks and pairs (after the gate)
 
 - **Catalog:** the union of `/api/rarity?body=<b>` values over all five
