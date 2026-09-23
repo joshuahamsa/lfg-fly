@@ -41,7 +41,10 @@ def populations(g: Graph) -> Populations:
         photoreceptor=pr,
         photoreceptor_type=t[pr],
         orn=orn,
-        orn_glomerulus=np.char.replace(t[orn], "ORN_", "", count=1),
+        # np.char.replace raises on a zero-size array (numpy#gh-25054-style
+        # buffersizes.max() of an empty array) -- guard the no-ORN case.
+        orn_glomerulus=(np.char.replace(t[orn], "ORN_", "", count=1)
+                        if orn.size else np.array([], dtype=t.dtype)),
         sensory_brain=np.flatnonzero(np.isin(sc, BRAIN_SENSORY)),
         sensory_vnc=np.flatnonzero(np.isin(sc, VNC_SENSORY)),
         # Exact set, not a substring match: only the three superclasses an input

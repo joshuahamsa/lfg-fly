@@ -34,6 +34,27 @@ def _cmd_build(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_columns(args: argparse.Namespace) -> int:
+    import numpy as np
+
+    from lfg_fly import env, paths
+    from lfg_fly.connectome import build as B
+    from lfg_fly.connectome import columns as C
+    from lfg_fly.connectome.fetch import FILES
+    from lfg_fly.connectome.neurons import populations
+
+    env.configure_libraries()
+    g = B.load_graph(paths.graph_dir() / f"graph-syn{args.min_syn}.npz")
+    pops = populations(g)
+    ann = B.load_annotations(paths.raw_dir() / FILES["annotations"])
+    edges = C.load_pr_edges(paths.raw_dir() / FILES["weights"], g.body_id[pops.photoreceptor])
+    cols = C.assign_columns(g, pops, ann, edges)
+    C.save_columns(cols, paths.graph_dir() / f"columns-syn{args.min_syn}.npz")
+    print(f"assigned {cols.total - cols.dropped}/{cols.total} photoreceptors; "
+          f"median top-column share {float(np.median(cols.share)):.2f}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="fly", description="The fly: an LFG-dressing connectome")
     sub = parser.add_subparsers(dest="command")
@@ -46,6 +67,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--min-syn", type=int, default=3)
     p.add_argument("--device", default="cuda")
     p.set_defaults(func=_cmd_build)
+
+    p = sub.add_parser("columns", help="assign photoreceptor columns from synaptic partners")
+    p.add_argument("--min-syn", type=int, default=3)
+    p.set_defaults(func=_cmd_columns)
 
     return parser
 
