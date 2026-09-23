@@ -44,5 +44,9 @@ def populations(g: Graph) -> Populations:
         orn_glomerulus=np.char.replace(t[orn], "ORN_", "", count=1),
         sensory_brain=np.flatnonzero(np.isin(sc, BRAIN_SENSORY)),
         sensory_vnc=np.flatnonzero(np.isin(sc, VNC_SENSORY)),
-        sensory_any=np.char.find(sc, "sensory") >= 0,
+        # Exact set, not a substring match: only the three superclasses an input
+        # code can actually drive (ol_sensory/cb_sensory/vnc_sensory). Related
+        # superclasses like sensory_ascending/sensory_descending and any *_tbc
+        # variant are NOT sensory here -- they still get the tonic bias.
+        sensory_any=np.isin(sc, BRAIN_SENSORY + VNC_SENSORY),
     )
