@@ -55,6 +55,19 @@ def _cmd_columns(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_catalog(args: argparse.Namespace) -> int:
+    from lfg_fly import paths
+    from lfg_fly.teacher.catalog import build_catalog
+    from lfg_fly.teacher.render import load_zorder
+
+    cache = paths.network_dir("mainnet") / "catalog"
+    cat = build_catalog(args.api.rstrip("/"), cache, body=args.body)
+    (cache / f"catalog-{args.body}.json").write_text(cat.to_json())
+    load_zorder(cache)
+    print({slot: len(v) for slot, v in cat.values.items()})
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="fly", description="The fly: an LFG-dressing connectome")
     sub = parser.add_subparsers(dest="command")
@@ -71,6 +84,11 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("columns", help="assign photoreceptor columns from synaptic partners")
     p.add_argument("--min-syn", type=int, default=3)
     p.set_defaults(func=_cmd_columns)
+
+    p = sub.add_parser("catalog", help="read the hero's wardrobe catalog from LFG's public API")
+    p.add_argument("--api", default="http://localhost:8176")
+    p.add_argument("--body", default="male")
+    p.set_defaults(func=_cmd_catalog)
 
     return parser
 
