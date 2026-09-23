@@ -159,11 +159,63 @@ def _cmd_grid(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_interact(args: argparse.Namespace) -> int:
+    import json
+    import logging
+
+    from lfg_fly import env, paths
+    from lfg_fly.teacher import grid as G
+    from lfg_fly.teacher import interact as I
+    from lfg_fly.teacher import interact_report as IR
+
+    env.configure_libraries()
+    logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
+    ctx = _load_context(args)
+    context, phase0 = I.interact_fingerprint(ctx), G.context_fingerprint(ctx)
+    print(f"context {context} (Phase 0 context {phase0})")
+    p0 = paths.repo_root() / "data" / "probe"
+    out = paths.repo_root() / "data" / "probe-interact"
+    a = G.current_records(p0 / "stage_a.jsonl", phase0)
+    if not a:
+        print(f"no Phase 0 Stage A records in context {phase0}: run `fly grid` first")
+        return 2
+    sets = I.taste_sets(ctx)
+    cal_path = out / "calibration.json"
+    if args.stage in ("calib", "all"):
+        cal = I.calibrate(ctx, sets, cal_path)
+        print("\n".join(IR.calibration_lines(cal)))
+    else:
+        cal = json.loads(cal_path.read_text()) if cal_path.exists() else {}
+    if args.stage in ("b", "all"):
+        why = I.calibration_blocks(cal, context)
+        if why:
+            print(f"stage B refused: {why}")
+            return 2
+        rows = I.stage_b(ctx, sets, a, G.current_records(p0 / "stage_b.jsonl", phase0),
+                         out / "stage_b.jsonl", limit=args.limit)
+        print(f"stage B: {len(rows)} probed; "
+              f"{I.unprobed(a, rows)} Stage A passer(s) not probed yet")
+    else:
+        rows = G.current_records(out / "stage_b.jsonl", context)
+    if args.stage in ("c", "all"):
+        left = I.unprobed(a, rows)
+        if left:
+            print(f"stage C refused: {left} Stage A passer(s) have no Stage B row; "
+                  "run `fly interact --stage b` without --limit first")
+            return 2
+        c = I.stage_c(ctx, sets, rows, out / "stage_c.json")
+        print("\n".join(IR.reading_lines(c)))
+    return 0
+
+
 def _cmd_report(args: argparse.Namespace) -> int:
     from lfg_fly import paths
-    from lfg_fly.teacher.report import write_report
+    from lfg_fly.teacher import interact_report, report
 
-    write_report(paths.repo_root() / "data" / "probe", paths.repo_root() / "docs" / "PHASE0.md")
+    data, docs = paths.repo_root() / "data", paths.repo_root() / "docs"
+    report.write_report(data / "probe", docs / "PHASE0.md")
+    if (data / "probe-interact" / "stage_c.json").exists():
+        interact_report.write_report(data / "probe-interact", docs / "PHASE0B.md")
     return 0
 
 
@@ -201,7 +253,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--stage", choices=["a", "b", "c", "all"], default="all")
     p.set_defaults(func=_cmd_grid)
 
-    p = sub.add_parser("report", help="write docs/PHASE0.md from data/probe")
+    p = sub.add_parser("interact",
+                       help="run Phase 0b, the interaction probe (spec §3.0b), on Phase 0's grid")
+    p.add_argument("--device", default="cuda")
+    p.add_argument("--min-syn", type=int, default=3)
+    p.add_argument("--pairs", type=int, default=3000)
+    p.add_argument("--limit", type=int, default=None,
+                   help="probe only the first N Stage A passers in Stage B (best Phase 0 score "
+                        "first): the reproduction pre-flight. Stage C refuses a partial Stage B")
+    p.add_argument("--stage", choices=["calib", "b", "c", "all"], default="all")
+    p.set_defaults(func=_cmd_interact)
+
+    p = sub.add_parser("report", help="write docs/PHASE0.md (and PHASE0B.md) from data/")
     p.set_defaults(func=_cmd_report)
 
     return parser
