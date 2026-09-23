@@ -203,6 +203,10 @@ def _cmd_interact(args: argparse.Namespace) -> int:
             print(f"stage C refused: {left} Stage A passer(s) have no Stage B row; "
                   "run `fly interact --stage b` without --limit first")
             return 2
+        why = I.shift_blocks(rows)
+        if why:
+            print(f"stage C refused: {why}")
+            return 2
         c = I.stage_c(ctx, sets, rows, out / "stage_c.json")
         print("\n".join(IR.reading_lines(c)))
     return 0

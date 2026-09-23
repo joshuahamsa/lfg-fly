@@ -5,8 +5,10 @@ the real wiring help there?
   the selection and the confirmation set. An interaction taste whose ceiling-minus-
   oracle gap is below MIN_GAP is too weak to test anything, and Stage B won't start.
 - Stage B: every Phase 0 Stage A passer, simulated once on the selection looks and
-  scored on every taste. The additive taste is Phase 0's, so a score off Phase 0's
-  Stage B by more than REPRO_TOL stops the run.
+  scored on every taste. The additive taste is Phase 0's: its labels must equal
+  Phase 0's exactly, and each setting's score minus Phase 0's is recorded. GPU
+  rounding moves single scores by up to ~0.01 (spec §3.0b amendment 1), so only a
+  mean shift beyond REPRO_MEAN_TOL over all settings blocks Stage C.
 - Stage C: per taste, the best setting on the confirmation set with its rewired and
   sign-shuffled twins (Phase 0's seeds) and the no-brain controls; the paired
   differences and the four pre-registered readings.
@@ -34,7 +36,7 @@ from lfg_fly.teacher.sample import bayes_ceiling
 from lfg_fly.teacher.tastes import TASTE_OFFSETS, TASTES, Tasted, additive_oracle, taste_set
 
 MIN_GAP = 0.03  # spec §3.0b: a weaker interaction term is retuned before Stage B
-REPRO_TOL = 0.005  # spec §3.0b: the additive taste must reproduce Phase 0's Stage B
+REPRO_MEAN_TOL = 0.005  # spec §3.0b amendment 1: a larger mean shift from Phase 0 is systematic
 LEARNS_LO = 0.55  # Gate B's bar on the CI lower bound (spec §3.4)
 TASTE_VERSION = 1  # bump whenever a taste's definition changes
 RENDER_BATCH = 512
@@ -42,7 +44,7 @@ SETS = ("selection", "confirmation")
 
 
 class ReproductionError(RuntimeError):
-    """The additive taste's Stage B score is not Phase 0's for the same setting."""
+    """The additive taste's labels are not Phase 0's."""
 
 
 @dataclass(frozen=True)
@@ -76,6 +78,14 @@ def taste_sets(ctx: G.Context) -> TasteSets:
         pixels[name], terms = render_looks(ctx, ps.looks)
         out[name] = {t: taste_set(ps, ctx.catalog, t, seed, visual_terms=terms) for t in TASTES}
     return TasteSets(out["selection"], out["confirmation"], pixels)
+
+
+def check_labels(ctx: G.Context, sets: TasteSets) -> None:
+    """The additive taste must be Phase 0's, label for label, on both sets: the relabelling
+    is the only new code between Phase 0's features and this probe's scores."""
+    for set_name, phase0 in (("selection", ctx.probe_set), ("confirmation", ctx.confirm_set)):
+        if not np.array_equal(getattr(sets, set_name)["additive"].ps.y, phase0.y):
+            raise ReproductionError(f"{set_name}: the additive taste's labels are not Phase 0's")
 
 
 def interact_fingerprint(ctx: G.Context) -> str:
@@ -146,9 +156,10 @@ def stage_b(ctx: G.Context, sets: TasteSets, stage_a_records: list[dict],
             limit: int | None = None) -> list[dict]:
     """`stage_a_records` and `phase0_b` must be Phase 0's, in this context. `limit` probes
     only the first N passers (best Phase 0 score first): the reproduction pre-flight."""
+    check_labels(ctx, sets)
     context = interact_fingerprint(ctx)
     done = {r["key"]: r for r in G.current_records(out_path, context)}
-    phase0 = {r["key"]: r["probe"]["heldout"] for r in phase0_b}
+    phase0 = {r["key"]: r["probe"] for r in phase0_b}
     looks, cache, out = ctx.probe_set.looks, {}, []
     for rec in _passers(stage_a_records, phase0_b)[:limit]:
         if rec["key"] in done:
@@ -160,17 +171,37 @@ def stage_b(ctx: G.Context, sets: TasteSets, stage_a_records: list[dict],
         X, stats = G.features_for(ctx, sim, G._setting_from(rec), looks, cache)
         probe = {taste: P.evaluate(X, t.ps, device=ctx.device, seed=ctx.seed).as_dict()
                  for taste, t in sets.selection.items()}
-        p0 = phase0.get(rec["key"])
-        if p0 is not None and abs(probe["additive"]["heldout"] - p0) > REPRO_TOL:
-            raise ReproductionError(
-                f"{rec['key']}: additive taste scores {probe['additive']['heldout']:.4f}, "
-                f"Phase 0's Stage B scored {p0:.4f} (tolerance {REPRO_TOL}); stopping")
+        p0 = phase0.get(rec["key"], {})
         row = {"key": rec["key"], "context": context, "setting": rec["setting"],
-               "passed": rec["passed"], "probe": probe, "phase0_additive": p0,
-               "stats": stats, "seconds": round(time.time() - t0, 2)}
+               "passed": rec["passed"], "probe": probe, "phase0_additive": p0.get("heldout"),
+               "phase0_lam": p0.get("lam"), "stats": stats,
+               "seconds": round(time.time() - t0, 2)}
         G._append(out_path, row)
         out.append(row)
     return out
+
+
+def reproduction_shift(rows: list[dict]) -> dict:
+    """Additive score minus Phase 0's over every row that has a Phase 0 score, and how
+    many rows chose a different L2 strength than Phase 0 did."""
+    checked = [r for r in rows if r.get("phase0_additive") is not None]
+    d = np.array([r["probe"]["additive"]["heldout"] - r["phase0_additive"] for r in checked])
+    if not len(d):
+        return {"n": 0, "mean": 0.0, "sd": 0.0, "max_abs": 0.0, "lam_changed": 0}
+    return {"n": len(d), "mean": float(d.mean()), "sd": float(d.std()),
+            "max_abs": float(np.abs(d).max()),
+            "lam_changed": sum(r["probe"]["additive"].get("lam") != r.get("phase0_lam")
+                               for r in checked)}
+
+
+def shift_blocks(rows: list[dict]) -> str | None:
+    """Why Stage C may not run: a mean shift from Phase 0 that rounding can't explain."""
+    shift = reproduction_shift(rows)
+    if shift["n"] and abs(shift["mean"]) > REPRO_MEAN_TOL:
+        return (f"systematic shift from Phase 0: the additive taste scores {shift['mean']:+.4f} "
+                f"on average over {shift['n']} settings (limit ±{REPRO_MEAN_TOL}); find the "
+                "pipeline difference before confirming anything")
+    return None
 
 
 def unprobed(stage_a_records: list[dict], rows: list[dict]) -> int:

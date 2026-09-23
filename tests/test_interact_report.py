@@ -41,11 +41,13 @@ def _write(d):
                                               "mlp": _res(0.72)} for t in TASTES}
                                       for s in ("selection", "confirmation")}}
     rows = [{"key": "a", "context": "ctx", "passed": True, "setting": SETTING,
-             "phase0_additive": 0.760,
-             "probe": {"additive": _res(0.761), "latent": _res(0.70), "visual": _res(0.60)}},
+             "phase0_additive": 0.760, "phase0_lam": 1.0,
+             "probe": {"additive": {**_res(0.761), "lam": 1.0}, "latent": _res(0.70),
+                       "visual": _res(0.60)}},
             {"key": "b", "context": "ctx", "passed": True, "setting": EYES,
-             "phase0_additive": 0.600,
-             "probe": {"additive": _res(0.598), "latent": _res(0.55), "visual": _res(0.66)}},
+             "phase0_additive": 0.600, "phase0_lam": 0.01,
+             "probe": {"additive": {**_res(0.598), "lam": 1.0}, "latent": _res(0.55),
+                       "visual": _res(0.66)}},
             {"key": "old", "context": "stale", "passed": True, "setting": EYES,
              "phase0_additive": 0.1,
              "probe": {"additive": _res(0.9), "latent": _res(0.9), "visual": _res(0.9)}}]
@@ -76,8 +78,8 @@ def test_report_uses_only_this_contexts_stage_b_rows(tmp_path):
     md = (tmp_path / "PHASE0B.md").read_text()
     assert "2 settings probed" in md
     assert "| lif-volley | eyes | 0.598 | 0.550 | 0.660 |" in md  # not the stale 0.9s
-    assert "All 2 settings' additive-taste scores reproduced" in md
-    assert "largest difference 0.0020" in md
+    assert ("Additive-taste score minus Phase 0's, over 2 settings: mean -0.0005, "
+            "sd 0.0015, largest |difference| 0.0020; 1 chose a different λ") in md
     assert "22153 repair swaps" in md
     assert "Janelia FlyEM MaleCNS" in md
 

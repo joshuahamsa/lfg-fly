@@ -112,7 +112,7 @@ def test_interact_fingerprint_extends_phase0s_context(tmp_path):
     assert fp != I.interact_fingerprint(dataclasses.replace(ctx, seed=1))
 
 
-def test_stage_b_reproduces_phase0_and_stops_when_it_does_not(tmp_path, monkeypatch):
+def test_stage_b_records_every_settings_difference_from_phase0(tmp_path, monkeypatch):
     _fast(monkeypatch)  # Phase 0's Stage B below runs under the same patch
     ctx = _ctx(tmp_path)
     a = _stage_a(ctx)
@@ -121,37 +121,74 @@ def test_stage_b_reproduces_phase0_and_stops_when_it_does_not(tmp_path, monkeypa
     out = tmp_path / "stage_b.jsonl"
     rows = I.stage_b(ctx, sets, a, phase0, out)
     assert len(rows) == 2
-    p0 = {r["key"]: r["probe"]["heldout"] for r in phase0}
+    p0 = {r["key"]: r["probe"] for r in phase0}
     for row in rows:
         assert set(row["probe"]) == set(S.TASTES)
-        assert row["probe"]["additive"]["heldout"] == p0[row["key"]]
-        assert row["phase0_additive"] == p0[row["key"]]
+        assert row["probe"]["additive"]["heldout"] == p0[row["key"]]["heldout"]  # CPU: exact
+        assert row["phase0_additive"] == p0[row["key"]]["heldout"]
+        assert row["phase0_lam"] == p0[row["key"]]["lam"]
         assert row["context"] == I.interact_fingerprint(ctx)
     # the best Phase 0 setting goes first
     assert rows[0]["key"] == max(phase0, key=lambda r: r["probe"]["heldout"])["key"]
     # resumable: nothing is simulated again
     again = I.stage_b(ctx, sets, a, phase0, out, sim=object())
     assert [r["key"] for r in again] == [r["key"] for r in rows]
-
+    # a difference is recorded, never a stop: GPU rounding moves single scores (amendment 1)
     off = [json.loads(json.dumps(r)) for r in phase0]
-    off[0]["probe"]["heldout"] += 2 * I.REPRO_TOL
-    bad = tmp_path / "bad.jsonl"
-    with pytest.raises(I.ReproductionError, match="Phase 0"):
-        I.stage_b(ctx, sets, a, off, bad)
-    first = max(off, key=lambda r: r["probe"]["heldout"])["key"]
-    assert first not in {r["key"] for r in G.read_jsonl(bad)}
+    off[0]["probe"]["heldout"] += 0.02
+    rows = I.stage_b(ctx, sets, a, off, tmp_path / "off.jsonl")
+    assert {r["phase0_additive"] for r in rows} == {r["probe"]["heldout"] for r in off}
+
+
+def test_any_relabelling_drift_stops_stage_b_before_it_writes(tmp_path):
+    ctx = _ctx(tmp_path)
+    sets = I.taste_sets(ctx)
+    I.check_labels(ctx, sets)
+    for set_name in I.SETS:
+        bad = I.taste_sets(ctx)
+        y = getattr(bad, set_name)["additive"].ps.y
+        y[0] = 1.0 - y[0]
+        with pytest.raises(I.ReproductionError, match=set_name):
+            I.check_labels(ctx, bad)
+        out = tmp_path / f"{set_name}.jsonl"
+        with pytest.raises(I.ReproductionError):
+            I.stage_b(ctx, bad, _stage_a(ctx), [], out)
+        assert not out.exists()
+
+
+def _shift_rows(diffs, lam_changes=0):
+    return [{"key": str(i), "probe": {"additive": {"heldout": 0.7 + d, "lam": 1.0}},
+             "phase0_additive": 0.7, "phase0_lam": 0.01 if i < lam_changes else 1.0}
+            for i, d in enumerate(diffs)] + [{"key": "new", "phase0_additive": None,
+                                             "probe": {"additive": {"heldout": 0.5}}}]
+
+
+def test_reproduction_shift_summarizes_the_differences_from_phase0():
+    shift = I.reproduction_shift(_shift_rows([0.01, -0.01, 0.003], lam_changes=2))
+    assert shift["n"] == 3 and shift["lam_changed"] == 2
+    assert shift["mean"] == pytest.approx(0.001)
+    assert shift["max_abs"] == pytest.approx(0.01)
+    assert shift["sd"] == pytest.approx(np.std([0.01, -0.01, 0.003]))
+    assert I.reproduction_shift([])["n"] == 0
+
+
+def test_a_systematic_shift_blocks_stage_c_and_rounding_does_not():
+    assert I.shift_blocks(_shift_rows([0.01, -0.01, 0.002, -0.004])) is None
+    assert I.shift_blocks(_shift_rows([])) is None
+    why = I.shift_blocks(_shift_rows([0.008, 0.004, 0.006]))
+    assert "systematic" in why and "+0.006" in why
 
 
 def test_stage_b_limit_probes_the_best_phase0_setting_only(tmp_path, monkeypatch):
     _fast(monkeypatch)
     ctx = _ctx(tmp_path)
     a = _stage_a(ctx)
-    phase0 = [{"key": SETTINGS[0].key(), "probe": {"heldout": 0.1}},
-              {"key": SETTINGS[1].key(), "probe": {"heldout": 0.9}}]
+    phase0 = [{"key": SETTINGS[0].key(), "probe": {"heldout": 0.1, "lam": 1.0}},
+              {"key": SETTINGS[1].key(), "probe": {"heldout": 0.9, "lam": 1.0}}]
     sets = I.taste_sets(ctx)
+    rows = I.stage_b(ctx, sets, a, phase0, tmp_path / "ranked.jsonl", limit=1)
+    assert [r["key"] for r in rows] == [SETTINGS[1].key()]  # Phase 0's best first
     out = tmp_path / "stage_b.jsonl"
-    with pytest.raises(I.ReproductionError):  # the toy doesn't score 0.9: proof it ran first
-        I.stage_b(ctx, sets, a, phase0, out, limit=1)
     rows = I.stage_b(ctx, sets, a, [], out, limit=1)
     assert [r["key"] for r in rows] == [SETTINGS[0].key()]  # no Phase 0 scores: grid order
     assert I.unprobed(a, rows) == 1 and I.unprobed(a, I.stage_b(ctx, sets, a, [], out)) == 0
@@ -265,6 +302,20 @@ def test_interact_cli_runs_calibration_then_stage_b_then_stage_c(tmp_path, monke
     assert run("--stage", "b") == 0 and calls[-1] == ("b", None, 2)
     assert run("--stage", "c") == 0 and calls[-1] == ("c", 2)
     assert "READINGS" in capsys.readouterr().out
+
+
+def test_interact_cli_refuses_stage_c_on_a_systematic_shift(tmp_path, monkeypatch, capsys):
+    run, calls = _cli(tmp_path, monkeypatch)
+    assert run("--stage", "calib") == 0 and run("--stage", "b") == 0
+    path = tmp_path / "repo" / "data" / "probe-interact" / "stage_b.jsonl"
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    for r in rows:
+        r.update(phase0_additive=0.70, phase0_lam=1.0,
+                 probe={"additive": {"heldout": 0.72, "lam": 1.0}})
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    capsys.readouterr()
+    assert run("--stage", "c") == 2 and calls[-1][0] == "b"
+    assert "stage C refused" in capsys.readouterr().out
 
 
 def test_interact_cli_refuses_stage_b_on_a_weak_taste(tmp_path, monkeypatch, capsys):

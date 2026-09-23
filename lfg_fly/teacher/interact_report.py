@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 from lfg_fly.teacher.grid import read_jsonl
-from lfg_fly.teacher.interact import LEARNS_LO, REPRO_TOL, SETS
+from lfg_fly.teacher.interact import LEARNS_LO, REPRO_MEAN_TOL, SETS, reproduction_shift
 from lfg_fly.teacher.report import ATTRIBUTION
 from lfg_fly.teacher.tastes import TASTES
 
@@ -126,12 +126,14 @@ def _calibration_table(cal: dict) -> list[str]:
 
 
 def _reproduction(rows: list[dict]) -> str:
-    checked = [r for r in rows if r.get("phase0_additive") is not None]
-    if not checked:
-        return "No Stage B row had a Phase 0 score to reproduce."
-    worst = max(abs(r["probe"]["additive"]["heldout"] - r["phase0_additive"]) for r in checked)
-    return (f"All {len(checked)} settings' additive-taste scores reproduced Phase 0's Stage B "
-            f"(largest difference {worst:.4f}; the run stops above {REPRO_TOL}).")
+    s = reproduction_shift(rows)
+    if not s["n"]:
+        return "No Stage B row had a Phase 0 score to compare with."
+    return (f"Additive-taste score minus Phase 0's, over {s['n']} settings: mean {s['mean']:+.4f}, "
+            f"sd {s['sd']:.4f}, largest |difference| {s['max_abs']:.4f}; {s['lam_changed']} chose "
+            "a different λ than in Phase 0. The labels are Phase 0's exactly; single scores move "
+            "by up to ~0.01 between identical runs because GPU rounding can flip the readout's "
+            f"CV-chosen λ (spec §3.0b amendment 1). Stage C requires |mean| ≤ {REPRO_MEAN_TOL}.")
 
 
 def write_report(results_dir: Path, out_md: Path) -> None:
