@@ -151,3 +151,22 @@ def test_gpu_matches_reference_exactly():
         torch.as_tensor(drive, device="cuda"), p, torch.as_tensor(rest, device="cuda"), "z"
     ).features.cpu().numpy()
     assert np.array_equal(got, ref)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+def test_gpu_rate_features_are_bit_identical_across_runs():
+    # A rate brain's W @ h sums non-integer products, so summation order shows in the low
+    # bits. cuSPARSE's CSR SpMM (torch's `W @ x`) varies that order from run to run on a
+    # graph this size; the simulator must not.
+    g = _random_graph(n=2000, m=100_000, seed=3)
+    sensory, readout = _masks(g)
+    p = S.BrainParams(kind="rate", g_syn=1.0, bias=0.1, steps=60, burn_in=50)
+    drive = torch.as_tensor(np.random.default_rng(4).uniform(0, 1, (g.n, 64)).astype(np.float32),
+                            device="cuda")
+    rest = torch.zeros(g.n, 1, device="cuda")
+    sim = S.Simulator(g, sensory, readout, "cuda")
+    first = sim.run(drive, p, rest, "z").features
+    again = sim.run(drive, p, rest, "z").features  # same cached rest state
+    fresh = S.Simulator(g, sensory, readout, "cuda").run(drive, p, rest, "z").features  # new rest
+    assert torch.equal(first, again)
+    assert torch.equal(first, fresh)
