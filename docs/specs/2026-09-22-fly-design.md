@@ -454,6 +454,29 @@ stored numbers came from the nondeterministic simulator, so amendment 1's
 comparison with them stands as written. Calibration is rerun on this code
 too.
 
+**Result (2026-09-24; `docs/PHASE0B.md`).** The reproduction check held:
+additive scores minus Phase 0's averaged −0.0001 over 130 settings (sd
+0.0021). On the confirmation set:
+
+| Reading | additive | latent | visual |
+|---|---|---|---|
+| Learns it (CI lower bound > 0.55) | yes (0.730) | **no** (0.540) | yes (0.642) |
+| Uses interactions (fly − one-hot) | no | no (**−0.088**, CI below 0) | no |
+| Wiring matters (fly − rewired) | no | no (**−0.082**, CI below 0) | no |
+| Beats no-brain (fly − MLP) | no | no (**−0.075**, CI below 0) | no |
+
+No model, fly or plain, recovered the interaction accuracy: every one
+scored below the additive oracle (latent 0.694, visual 0.745). On the
+latent taste the fly is significantly *worse* than every control, its own
+rewired twin included.
+
+The critic phase goes ahead or not on the operator's call. What this probe
+predicts:
+- a critic taste that is mostly additive or broadly visual is learnable to
+  about a plain model's accuracy;
+- an interaction-heavy one is not learnable from about 3,000 pairs, by the
+  fly or by any model tried here.
+
 ### 3.1 Looks and pairs (after the gate)
 
 - **Catalog:** the union of `/api/rarity?body=<b>` values over all five

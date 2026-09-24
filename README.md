@@ -52,11 +52,48 @@ simulation. The committed results have not been rerun. The simulator now uses it
 kernel ([`lfg_fly/brain/spmm.py`](lfg_fly/brain/spmm.py)), so repeated runs on one GPU give
 bit-identical features.
 
-**What Phase 0 does not answer:** the taste was *additive*, and for an additive task a model
-on the plain trait list is already the right tool. Whether the connectome captures trait
-**interactions** better than a plain model is the open question. That is where "an unexpected
-combination that works" lives. The critic phase tests it with the same controls, and the
-report will state that answer as plainly as this one.
+## Phase 0b: the fly doesn't learn trait interactions, and nothing else does either
+
+Phase 0's taste was *additive*, and for an additive task a model on the plain trait list is
+already the right tool. The question Phase 0 left open is whether the connectome captures trait
+**interactions** better than a plain model. That is where "an unexpected combination that works"
+lives. Phase 0b asks it before any critic tokens are spent. It plants two tastes that are half
+interaction and half additive, then re-probes every one of Phase 0's 130 passing settings.
+
+- **latent:** hidden trait "harmony" vectors, where pairs of traits score by how well they fit.
+- **visual:** how well the character stands out from the background, plus hue harmony.
+
+The tests and the four readings were pre-registered before any run (design spec §3.0b), and the
+simulator is now deterministic, so every number reproduces exactly. Full tables are in
+[`docs/PHASE0B.md`](docs/PHASE0B.md), raw results in [`data/probe-interact/`](data/probe-interact/).
+
+| Held-out, confirmation set | additive | latent | visual |
+|---|---|---|---|
+| Bayes ceiling | 0.819 | 0.835 | 0.824 |
+| Best any additive model can do | 0.819 | 0.694 | 0.745 |
+| **The fly** | **0.762** | **0.582** | **0.680** |
+| Rewired twin | 0.765 | 0.663 | 0.678 |
+| No brain (logistic regression on the trait list) | 0.770 | 0.670 | 0.708 |
+| MLP (256 hidden) on traits + pixel stats | 0.752 | 0.657 | 0.687 |
+
+- **No model learns the interactions from about 3,000 pairs.** On the latent taste, 0.14 of
+  accuracy is available *only* through interactions (0.835 − 0.694). Every model lands below
+  the best purely additive score, the MLP included.
+- **The fly does no better, and on the latent taste it does significantly worse.** It trails
+  every control there, including its own rewired twin (−0.082, 95% CI −0.122 to −0.040). Its
+  best setting scored 0.645 on the selection set and fell to 0.582 on a fresh instance.
+- **On the visual taste the fly learns (0.680), but only as well as a plain model.** Its eyes
+  don't help: on the selection set, the best eyes-only setting (0.650) trails the
+  all-sensory ones (0.678).
+- **Pre-registered readings:**
+  - *Learns it* (CI lower bound above 0.55): holds for additive (0.730) and visual (0.642); fails for latent (0.540).
+  - *Uses interactions*, *wiring matters*, *beats no-brain*: hold for **no** taste.
+
+**What this means for the critic phase.** The critic's taste will be learned from a similar
+number of pairs, and at that scale "an unexpected combination that works" is not learnable here,
+by the fly or by anything else we tried. The fly can learn the additive and broadly visual parts
+of a taste, as well as a plain model can. If the critic's taste is mostly that, it would likely
+clear Gate B's bar. If it is interaction-heavy, it likely won't.
 
 ## Reproduce
 
@@ -67,7 +104,8 @@ nice -n 10 ionice -c3 .venv/bin/fly build   # integer-CSR graph on the GPU
 nice -n 10 ionice -c3 .venv/bin/fly columns # photoreceptor columns from synaptic partners
 nice -n 10 ionice -c3 .venv/bin/fly catalog --api https://<lfg-api-base>
 nice -n 10 ionice -c3 .venv/bin/fly grid --device cuda   # Stages A, B, C and verdict (resumable)
-.venv/bin/fly report                        # docs/PHASE0.md
+nice -n 10 ionice -c3 .venv/bin/fly interact --device cuda   # Phase 0b: calibration, B, C (resumable)
+.venv/bin/fly report                        # docs/PHASE0.md and docs/PHASE0B.md
 ```
 
 Data lives in `FLY_DATA_DIR` (default `~/fly-data`), never in this repo. Everything runs
