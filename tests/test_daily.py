@@ -746,14 +746,16 @@ def test_ecosystem_config_runs_the_three_jobs_niced_on_utc_cron():
     for name, (cron, command) in expected.items():
         app = apps[name]
         assert app["cron_restart"] == cron
-        assert app["script"] == "/usr/bin/nice"
-        assert app["interpreter"] == "none"
-        assert app["autorestart"] is False and app["autostart"] is False
-        assert app["args"][:4] == ["-n", "10", "ionice", "-c3"]
-        python = app["args"][4]
+        # pm2 cannot spawn /usr/bin/nice as a script, so the job is scripts/fly-job.sh under
+        # bash, which execs nice -n 10 ionice -c3 around the venv python (`-m lfg_fly`:
+        # cli.py has no __main__ guard, so `-m lfg_fly.cli` would run nothing)
+        assert app["script"] == "scripts/fly-job.sh" and app["interpreter"] == "bash"
+        assert app["autorestart"] is False
+        assert app["args"] == [command]
+        python = app["env"]["FLY_PYTHON"]
         assert python.endswith("/.venv/bin/python") and python.startswith(str(paths.repo_root()))
-        # `-m lfg_fly` (lfg_fly/__main__.py): cli.py has no __main__ guard, so `-m lfg_fly.cli`
-        # would import it and exit 0 without running anything
-        assert app["args"][5:] == ["-m", "lfg_fly", command]
+        wrapper = (paths.repo_root() / "scripts" / "fly-job.sh").read_text(encoding="utf-8")
+        assert 'exec /usr/bin/nice -n 10 ionice -c3 "$PY" -m lfg_fly "$@"' in wrapper
+        assert os.access(paths.repo_root() / "scripts" / "fly-job.sh", os.X_OK)
         assert app["cwd"] == str(paths.repo_root())
         assert app["env"]["PYTHONUNBUFFERED"] == "1"
