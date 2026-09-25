@@ -8,10 +8,10 @@
 //
 // Times are UTC (this box is Etc/UTC; pm2 schedules crons in the daemon's zone), clear of
 // LFG's own cron slots (00:10-03:40 UTC). Each job runs once and exits: `autorestart: false`
-// keeps pm2 from re-running it, `autostart: false` keeps `pm2 start ecosystem.config.js`
-// from firing a run outside its slot (a stray fly-move is a real move), and `cron_restart`
-// starts it on schedule (pm2 registers the cron before it honours autostart, so a stopped
-// job still fires).
+// keeps pm2 from re-running it, and `cron_restart` starts it on schedule. `pm2 start
+// ecosystem.config.js` runs each job once immediately (a stray fly-move is a real move,
+// refused only if today's record is already done), so register the jobs outside 15:00 UTC
+// or with FLY_ENABLED unset, and stop them right after.
 //
 //   pm2 start ecosystem.config.js && pm2 save
 //   pm2 start fly-claim          # run one job by hand, off schedule
@@ -31,18 +31,17 @@ function job(name, cron, command) {
   return {
     name,
     cwd: root,
-    script: "/usr/bin/nice",
-    args: ["-n", "10", "ionice", "-c3", python, "-m", "lfg_fly", ...command],
-    interpreter: "none",
+    script: "scripts/fly-job.sh",
+    interpreter: "bash",
+    args: command,
     cron_restart: cron,
     autorestart: false,
-    autostart: false,
     instances: 1,
     exec_mode: "fork",
     time: true,
     merge_logs: true,
     kill_timeout: 60000,
-    env: { PYTHONUNBUFFERED: "1", TZ: "UTC" },
+    env: { PYTHONUNBUFFERED: "1", TZ: "UTC", FLY_PYTHON: python },
   };
 }
 
