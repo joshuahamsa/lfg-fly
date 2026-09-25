@@ -79,7 +79,7 @@ def _fresh_identity_cache():
 
 def cfg_for(base: str, rpc: FR.FakeRpc, **over) -> FlyConfig:
     fields = dict(network="testnet", api_base=base, rpc_urls=(rpc.url,),
-                  expected_ledger_hash=FR.TESTNET_HASH)
+                  expected_ledger_hash=FR.TESTNET_HASH, enabled=True)
     fields.update(over)
     return FlyConfig(**fields)
 
@@ -93,12 +93,19 @@ def files_under(root) -> list[str]:
 
 
 def assert_no_token_on_disk(state: FL.FakeLfgState, root) -> None:
-    tokens = list(state.tokens) + [t for t in getattr(state, "_issued", [])]
-    for path in files_under(root):
+    """Every token the fake ever issued (it forgets them itself on logout) is absent from
+    every file under FLY_DATA_DIR: the alerts embed LFG's answers and the retrain meta embeds
+    the stamp, and neither may ever grow a token (§4.4, §7)."""
+    tokens = state.issued_tokens
+    assert tokens, "no session token was issued"
+    files = files_under(root)
+    assert files, "nothing was written, so nothing was checked"
+    for path in files:
         with open(path, "rb") as f:
             data = f.read()
         for tok in tokens:
             assert tok.encode() not in data, f"session token written to {path}"
+        assert b"Bearer" not in data and b"session_token" not in data, path
 
 
 # ------------------------------------------------------------------ credentials
@@ -286,6 +293,25 @@ def test_claim_claims_disabled_alerts_and_exits_zero(fake_lfg, keys):
     assert state.logouts == 1
     for tok in state.sessions:
         assert tok["jti"] not in json.dumps(payload)
+
+
+def test_claim_refuses_when_not_enabled(fake_lfg, keys):
+    """Spec §4.4 kill procedure step 2 / §5 step 6: without FLY_ENABLED=1 the job does
+    nothing at all; not the chain, not the key, not LFG."""
+    base, state = fake_lfg
+    state.brix_trustline_set = True
+    state.brix["claimable"] = 5
+
+    async def go():
+        async with FR.FakeRpc() as rpc:
+            with pytest.raises(D.NotEnabled, match="FLY_ENABLED") as info:
+                await D.claim(cfg_for(base, rpc, enabled=False))
+            assert isinstance(info.value, D.DailyError)
+            return rpc
+
+    rpc = run(go())
+    assert rpc.calls == [] and state.requests == [] and state.signin_starts == 0
+    assert state.brix["claimable"] == 5 and outbox.alerts("testnet") == []
 
 
 def test_claim_nothing_to_claim_is_quiet(fake_lfg, keys):
@@ -514,8 +540,7 @@ def test_retrain_writes_the_snapshot_and_a_head_named_by_it(fake_lfg, keys, _dat
     head = R.load_head(result.head_path)
     assert isinstance(head, R.RarityHead) and head.snapshot_hash == h
     assert head.w.shape == (len(brain.index) + len(SLOTS),)
-    # the loop finds the newest head by globbing rarity-head-*.json and swapping the suffix:
-    # nothing else this writes may match that pattern
+    # the head's own files carry no stamp; the stamp lives in the meta and the pointer
     snapshots = paths.snapshots_dir("testnet")
     assert [p.name for p in snapshots.glob("rarity-head-*.json")] == [f"rarity-head-{h}.json"]
     assert (snapshots / f"rarity-meta-{h}.json").exists()
@@ -567,6 +592,23 @@ def test_retrain_is_reproducible_and_skips_an_existing_head_unless_forced(fake_l
     other = run(do_retrain(base, FakeBrain(cat), n=50, force=True, seed=7))
     assert other.looks != first.looks
     assert state.logouts == 4
+
+
+def test_retrain_refuses_when_not_enabled(fake_lfg, keys):
+    base, state = fake_lfg
+    cat = _cat()
+    state.rarity_supply = _supply(cat)
+    brain = FakeBrain(cat)
+
+    async def go():
+        async with FR.FakeRpc() as rpc:
+            with pytest.raises(D.NotEnabled, match="FLY_ENABLED"):
+                await D.retrain(cfg_for(base, rpc, enabled=False), brain, n=20)
+            return rpc
+
+    rpc = run(go())
+    assert rpc.calls == [] and state.requests == [] and state.signin_starts == 0
+    assert brain.calls == [] and not paths.snapshots_dir("testnet").exists()
 
 
 def test_retrain_refuses_a_supply_from_another_network(fake_lfg, keys):
@@ -635,6 +677,37 @@ def test_cmd_claim_loads_the_env_file_and_returns_the_exit_code(monkeypatch, tmp
 
     monkeypatch.setattr(D, "claim", failed_claim)
     assert CD._cmd_claim(args) == 1
+
+
+def test_cmd_claim_and_retrain_refuse_with_exit_2_when_not_enabled(monkeypatch, capsys):
+    """The kill switch at the CLI: one line, exit 2 (as `fly move` does), and for retrain
+    the brain is never loaded (the check comes before the GPU)."""
+    from lfg_fly.brain.checkpoint import FlyBrain
+
+    monkeypatch.setenv("FLY_NETWORK", "testnet")
+    monkeypatch.delenv("FLY_ENABLED", raising=False)
+    assert CD._cmd_claim(argparse.Namespace(timeout=1.0, every=0.1)) == 2
+    out = capsys.readouterr().out
+    assert out.startswith("claim refused:") and "FLY_ENABLED" in out
+
+    def never(*_a, **_k):
+        raise AssertionError("the brain must not load when the fly is switched off")
+
+    monkeypatch.setattr(FlyBrain, "load", never)
+    args = argparse.Namespace(n=10, device="cpu", lam=1.0, seed=None, force=False)
+    assert CD._cmd_retrain(args) == 2
+    out = capsys.readouterr().out
+    assert out.startswith("retrain refused:") and "FLY_ENABLED" in out
+
+    # switched on, a DailyError from the job itself is still one line and exit 2
+    monkeypatch.setenv("FLY_ENABLED", "1")
+
+    async def refusing(cfg, *, timeout, every):
+        raise D.CredentialsError("no wallet.json")
+
+    monkeypatch.setattr(D, "claim", refusing)
+    assert CD._cmd_claim(argparse.Namespace(timeout=1.0, every=0.1)) == 2
+    assert "claim refused: no wallet.json" in capsys.readouterr().out
 
 
 def test_claim_result_exit_codes():

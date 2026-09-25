@@ -30,9 +30,14 @@ def _prepare():
 
 def _cmd_claim(args: argparse.Namespace) -> int:
     """fly-claim (spec §4): claim the BRIX drip and poll its status; exit 0 on confirmed,
-    nothing to claim, or claims disabled on this stack (spec §5.3, alert written)."""
+    nothing to claim, or claims disabled on this stack (spec §5.3, alert written); exit 2
+    when the kill switch is off (`FLY_ENABLED` != 1, spec §4.4)."""
     D, cfg = _prepare()
-    result = asyncio.run(D.claim(cfg, timeout=args.timeout, every=args.every))
+    try:
+        result = asyncio.run(D.claim(cfg, timeout=args.timeout, every=args.every))
+    except D.DailyError as e:
+        print(f"claim refused: {e}")
+        return 2
     print(result.message)
     if result.alert is not None:
         print(f"alert: {result.alert}")
@@ -41,16 +46,26 @@ def _cmd_claim(args: argparse.Namespace) -> int:
 
 def _cmd_retrain(args: argparse.Namespace) -> int:
     """fly-retrain (spec §4): supply snapshot -> live-concentration re-simulation -> a new
-    rarity head named by the snapshot hash. The brain loads before the session opens."""
+    rarity head named by the snapshot hash. The kill switch is checked before the brain
+    loads (exit 2); the brain loads before the session opens."""
     D, cfg = _prepare()
+    try:
+        D.require_enabled(cfg, "fly-retrain")
+    except D.DailyError as e:
+        print(f"retrain refused: {e}")
+        return 2
     from lfg_fly import env, paths
     from lfg_fly.brain.checkpoint import FlyBrain
 
     env.configure_libraries()
     brain = FlyBrain.load(paths.checkpoint_dir(cfg.version), args.device,
                           paths.catalog_dir(cfg.network))
-    result = asyncio.run(D.retrain(cfg, brain, n=args.n, lam=args.lam, seed=args.seed,
-                                   force=args.force))
+    try:
+        result = asyncio.run(D.retrain(cfg, brain, n=args.n, lam=args.lam, seed=args.seed,
+                                       force=args.force))
+    except D.DailyError as e:
+        print(f"retrain refused: {e}")
+        return 2
     if result.skipped:
         print(f"snapshot {result.snapshot_hash[:16]} unchanged; rarity head kept at "
               f"{result.head_path}")

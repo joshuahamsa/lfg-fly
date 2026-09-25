@@ -203,7 +203,8 @@ class FakeLfgState:
     key_lookup_ok: bool = True  # False -> 503 regular_key_unverified for RegularKey proofs
     key_revoked: bool = False  # True -> every bearer request 401 key_revoked
     # sessions
-    tokens: dict[str, str] = field(default_factory=dict)  # token -> wallet
+    tokens: dict[str, str] = field(default_factory=dict)  # token -> wallet (live ones)
+    issued_tokens: list[str] = field(default_factory=list)  # every token ever issued
     sessions: list[dict] = field(default_factory=list)  # issued tokens' claims
     logouts: int = 0
     logout_error: tuple[int, dict] | None = None
@@ -547,6 +548,7 @@ def make_app(state: FakeLfgState) -> web.Application:
         row["wallet"] = account
         state.proofs.append(body["tx_json"])
         token = "tok-" + secrets.token_hex(16)
+        state.issued_tokens.append(token)  # so a test can scan the disk for it after logout
         claims = {
             "id": account, "name": account[:8], "platform": "web", "provider": "agent",
             "exp": time.time() + 21600, "jti": uuid.uuid4().hex, "wallet": account,

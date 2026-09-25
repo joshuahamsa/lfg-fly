@@ -13,7 +13,7 @@ import asyncio
 import fcntl
 import json
 import os
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta, timezone
 
 import fake_lfg as FL
@@ -22,11 +22,13 @@ import pytest
 from PIL import Image
 
 from lfg_fly import paths
+from lfg_fly.body import daily as D
 from lfg_fly.body import loop as L
 from lfg_fly.body import outbox
 from lfg_fly.body import records as R
 from lfg_fly.body.client import LfgError
 from lfg_fly.body.config import FlyConfig
+from lfg_fly.brain import readout
 from lfg_fly.brain.readout import RarityHead
 from lfg_fly.brain.senses import SLOTS
 from lfg_fly.teacher.render import zorder_from_config
@@ -258,19 +260,32 @@ def test_dry_run_writes_a_record_and_never_equips(world):
     assert gets.index("/api/nfts") < gets.index("/api/economy") < gets.index("/api/rarity/supply")
 
 
+def _assert_tokens_off_disk(w) -> None:
+    """Every token the fake ever issued (it forgets them itself on logout) is absent from
+    every file under FLY_DATA_DIR: the record, the outbox post, the card (§4.1 step 1, §7)."""
+    tokens = w.state.issued_tokens
+    assert tokens, "the fake issued no session token"
+    files = files_under(paths.data_dir())
+    assert files, "nothing was written, so nothing was checked"
+    for f in files:
+        data = f.read_bytes()
+        for tok in tokens:
+            assert tok.encode() not in data, f
+        assert b"Bearer" not in data and b"session_token" not in data, f
+
+
 def test_dry_run_logs_out_and_keeps_the_token_off_disk(world):
     w = world
     do_move(w, dry_run=True)
     assert w.state.logouts == 1
     assert w.state.tokens == {}  # the fake forgot it on logout
-    tokens = [s["token"] for s in w.state.sessions] if w.state.sessions and \
-        "token" in w.state.sessions[0] else []
-    for f in files_under(paths.data_dir()):
-        text = f.read_text(errors="ignore")
-        for tok in tokens:
-            assert tok not in text
-        assert "Bearer" not in text
-        assert "session_token" not in text
+    assert len(w.state.issued_tokens) == 1
+    _assert_tokens_off_disk(w)
+    # a real move writes more (the equip status, the outbox post and its card): still nothing
+    do_move(w)
+    assert w.state.logouts == 2 and len(w.state.issued_tokens) == 2
+    assert (paths.outbox_dir("testnet") / ".").is_dir()
+    _assert_tokens_off_disk(w)
 
 
 def test_the_brain_saw_every_candidate_in_one_batch_per_step(world):
@@ -493,6 +508,49 @@ def test_a_submitted_record_whose_session_is_gone_goes_to_the_ledger(world):
     assert w.ledger.uri_calls == [(HERO, w.wallet)]
 
 
+def test_a_submitted_record_whose_session_never_settles_goes_to_the_ledger(world):
+    """§4.2: a session still `running` when the poll gives up is resolved from the ledger,
+    like one that no longer exists; the TimeoutError is noted, never re-raised."""
+    w = world
+    rec = do_move(w, dry_run=True)
+    w.state.equip_outcome = "hang"
+    sid = run(_start_equip(w, rec))
+    rec.state, rec.equip_id, rec.submitted_at = "submitted", sid, NOW.isoformat()
+    R.write(rec)
+    w.ledger = FakeLedger(uri="ipfs://QmHero")
+    with pytest.raises(L.LoopRefused, match="already"):
+        do_move(w, now=NOW + timedelta(minutes=30), equip_timeout=0.05, equip_poll=0.01,
+                fetch_metadata=metadata_of(PIRATE_MONOCLE))
+    fixed = R.read(R.path_for("testnet", TODAY), stamp_for(w))
+    assert fixed.state == "done" and "still 'running'" in (fixed.error or "")
+    assert "resolved from the ledger as done" in fixed.error
+    assert w.ledger.uri_calls == [(HERO, w.wallet)]
+    assert posts(w.state).count("/api/equip") == 1
+    assert w.state.equip_sessions[sid]["state"] == "running"  # LFG's session was left alone
+    assert w.state.logouts == 3  # the dry run, _start_equip and the reconciling run
+
+
+def test_a_submitted_record_whose_status_read_fails_is_left_submitted(world):
+    """Only a 404 sends a `submitted` record to the ledger; any other LFG refusal (here the
+    RegularKey was revoked, 401) propagates and the record waits for the next run."""
+    w = world
+    rec = do_move(w, dry_run=True)
+    sid = run(_start_equip(w, rec))
+    rec.state, rec.equip_id, rec.submitted_at = "submitted", sid, NOW.isoformat()
+    R.write(rec)
+    w.ledger = FakeLedger(uri="ipfs://QmHero")
+    w.state.key_revoked = True
+    with pytest.raises(LfgError) as info:
+        do_move(w, now=NOW + timedelta(minutes=30), fetch_metadata=metadata_of(PIRATE_MONOCLE))
+    assert info.value.status == 401 and info.value.code == "key_revoked"
+    left = R.read(R.path_for("testnet", TODAY), stamp_for(w))
+    assert left.state == "submitted" and left.equip_id == sid and left.error is None
+    assert w.ledger.uri_calls == []  # never guessed from the ledger
+    assert posts(w.state).count("/api/equip") == 1
+    assert w.state.tokens == {}  # the fake killed the session; the client dropped its token
+    assert outbox.alerts("testnet") == []
+
+
 def test_a_pending_record_from_a_crashed_run_is_resolved_before_moving(world):
     w = world
     rec = do_move(w, dry_run=True)
@@ -706,26 +764,166 @@ def test_rarity_head_is_used_when_present_and_named_in_the_record(world):
     assert stay["changes"] == [] and abs(stay["score"] - (0.0 + 0.3 * 0.5)) < 1e-9
 
 
-def test_rarity_head_is_loaded_from_the_snapshots_dir(world):
-    from lfg_fly.brain import readout
+def _write_head(h: str, b: float, *, pointer: R.Stamp | None, snapshot_hash: str | None = None):
+    """A rarity head under `snapshots/` as `fly retrain` leaves it, with (or without) the
+    stamped pointer the loop reads; `snapshot_hash` lets the head disagree with its name."""
+    head = RarityHead(mu=np.zeros(3), sd=np.ones(3), w=np.zeros(3), b=b,
+                      snapshot_hash=snapshot_hash or h, target_mu=0.0, target_sd=1.0)
+    npz, _js = D.head_files("testnet", h)
+    readout.save_head(npz, head)
+    if pointer is not None:
+        target = paths.snapshots_dir("testnet") / D.LATEST_HEAD
+        target.write_text(json.dumps({"stamp": asdict(pointer), "snapshot_hash": h,
+                                      "head": str(npz)}), encoding="utf-8")
+    return npz
 
-    head = RarityHead(mu=np.zeros(3), sd=np.ones(3), w=np.zeros(3), b=0.25,
-                      snapshot_hash="cd" * 32, target_mu=0.0, target_sd=1.0)
-    base = paths.rarity_head_path("testnet", "cd" * 32)
-    readout.save_head(base.with_name(base.name + ".npz"), head)
-    assert L.load_rarity_head("testnet").snapshot_hash == "cd" * 32
-    rec = do_move(world, dry_run=True)
+
+def test_rarity_head_is_loaded_through_the_stamped_pointer(world):
+    """The loop reads the head `fly retrain` named in `latest-rarity-head.json`, whose stamp
+    must be this fly's (spec §1); the head file itself carries no stamp."""
+    w = world
+    _write_head("cd" * 32, 0.25, pointer=stamp_for(w))
+    assert L.load_rarity_head("testnet", stamp_for(w)).snapshot_hash == "cd" * 32
+    rec = do_move(w, dry_run=True)
     assert rec.rarity_head == "cd" * 32
     assert all(c["rarity"] == 0.25 for c in rec.candidates)
 
 
+def test_a_rarity_head_without_the_pointer_is_never_picked_up(world):
+    """No mtime glob: a `rarity-head-*.npz` that no stamped pointer names (a file copied
+    across from another stack's directory) is not a head for this fly."""
+    w = world
+    _write_head("cd" * 32, 0.25, pointer=None)
+    assert L.load_rarity_head("testnet", stamp_for(w)) is None
+    rec = do_move(w, dry_run=True)
+    assert rec.rarity_head is None and w.brain.rarity_calls == []
+
+
+def test_a_foreign_rarity_head_stops_the_loop_with_an_alert(world):
+    """Spec §1: a rarity-head artifact stamped for another stack (same network, another
+    LFG api base) is refused, and the loop stops with an outbox alert, like a record."""
+    w = world
+    foreign = R.Stamp(network="testnet", lfg_api_base="http://other", wallet=w.wallet)
+    _write_head("cd" * 32, 0.25, pointer=foreign)
+    with pytest.raises(R.StampMismatch):
+        L.load_rarity_head("testnet", stamp_for(w))
+    with pytest.raises(L.LoopStopped, match="stamp"):
+        do_move(w)
+    alerts = outbox.alerts("testnet")
+    assert len(alerts) == 1 and alerts[0]["payload"]["kind"] == "stamp_mismatch"
+    assert "rarity head" in alerts[0]["payload"]["message"]
+    assert "http://other" in alerts[0]["payload"]["message"]
+    assert "/api/equip" not in posts(w.state)
+    assert not paths.records_dir("testnet").exists()  # stopped before the day's record
+    assert w.state.logouts == 1
+    # a pointer stamped for another wallet is just as foreign
+    _write_head("cd" * 32, 0.25, pointer=R.Stamp("testnet", w.base, "rSomeoneElse"))
+    with pytest.raises(L.LoopStopped, match="stamp"):
+        do_move(w, dry_run=True)
+
+
+def test_a_pointer_whose_head_disagrees_is_refused(world):
+    w = world
+    _write_head("cd" * 32, 0.25, pointer=stamp_for(w), snapshot_hash="ef" * 32)
+    with pytest.raises(ValueError, match="cdcdcdcd"):
+        L.load_rarity_head("testnet", stamp_for(w))
+
+
 def test_without_a_rarity_head_rarity_is_zero_and_disclosed(world):
     w = world
-    assert L.load_rarity_head("testnet") is None
+    assert L.load_rarity_head("testnet", stamp_for(w)) is None
     rec = do_move(w, dry_run=True)
     assert rec.rarity_head is None
     assert all(c["rarity"] == 0.0 for c in rec.candidates)
     assert w.brain.rarity_calls == []
+
+
+# ------------------------------------------------------------------ posting to X (§4.5)
+
+X_CREDS = {"FLY_X_API_KEY": "ck-test-key", "FLY_X_API_SECRET": "cs-test-secret",
+           "FLY_X_ACCESS_TOKEN": "at-test-token", "FLY_X_ACCESS_SECRET": "as-test-secret"}
+
+
+def _x_transport(calls: list, *, upload_status: int = 200, post_status: int = 201):
+    def transport(method, url, headers, body):
+        calls.append((method, url, dict(headers), body))
+        if url == L.x_post.MEDIA_UPLOAD_URL:
+            return upload_status, json.dumps({"data": {"id": "m-1", "media_key": "3_m-1"}}).encode()
+        assert url == L.x_post.TWEETS_URL
+        return post_status, json.dumps({"data": {"id": "1234567890", "text": "…"}}).encode()
+
+    return transport
+
+
+def _assert_no_x_secret_on_disk() -> None:
+    for f in files_under(paths.data_dir()):
+        data = f.read_bytes()
+        for secret in X_CREDS.values():
+            assert secret.encode() not in data, f
+
+
+def test_a_done_day_posts_to_x_within_the_budget(world, monkeypatch):
+    """§4.5 with credentials: the card is uploaded, the post is created, the month's counter
+    is charged, and neither the outbox nor the disk sees the post or a credential."""
+    w = world
+    for k, v in X_CREDS.items():
+        monkeypatch.setenv(k, v)
+    calls: list = []
+    monkeypatch.setattr(L.x_post, "urllib_transport", _x_transport(calls))
+    rec = do_move(w)
+    assert rec.state == "done"
+    assert rec.post["channel"] == "x"
+    assert rec.post["result"] == {"id": "1234567890", "media_id": "m-1",
+                                  "url": "https://x.com/i/status/1234567890"}
+    assert [c[1] for c in calls] == [L.x_post.MEDIA_UPLOAD_URL, L.x_post.TWEETS_URL]
+    upload, post = calls
+    assert upload[2]["Content-Type"].startswith("multipart/form-data; boundary=")
+    assert b"\x89PNG\r\n\x1a\n" in upload[3] and b'name="media"' in upload[3]
+    assert post[2]["Content-Type"] == "application/json"
+    assert json.loads(post[3]) == {"text": rec.post["text"],
+                                   "media": {"media_ids": ["m-1"]}}
+    for c in calls:
+        assert c[2]["Authorization"].startswith("OAuth oauth_consumer_key=\"ck-test-key\"")
+    month = datetime.now(timezone.utc).strftime("%Y-%m")
+    counter = json.loads((paths.network_dir("testnet") / f"x-posts-{month}.json").read_text())
+    assert len(counter["posts"]) == 1 and counter["network"] == "testnet"
+    assert not list(paths.outbox_dir("testnet").glob("*-post.json")) \
+        if paths.outbox_dir("testnet").is_dir() else True
+    _assert_no_x_secret_on_disk()
+    on_disk = R.read(R.path_for("testnet", TODAY), stamp_for(w))
+    assert on_disk.post == rec.post
+
+
+def test_a_done_day_goes_to_the_outbox_when_the_x_budget_is_used_up(world, monkeypatch):
+    w = world
+    for k, v in X_CREDS.items():
+        monkeypatch.setenv(k, v)
+    calls: list = []
+    monkeypatch.setattr(L.x_post, "urllib_transport", _x_transport(calls))
+    rec = do_move(w, cfg=cfg_for(w.base, x_monthly_budget=0))
+    assert rec.state == "done" and calls == []
+    assert rec.post["channel"] == "outbox" and rec.post["reason"].startswith("x_budget: 0 of 0")
+    payload = json.loads(open(rec.post["path"], encoding="utf-8").read())["payload"]
+    assert payload["reason"] == rec.post["reason"] and payload["text"] == rec.post["text"]
+    assert os.path.exists(rec.post["card"])
+    _assert_no_x_secret_on_disk()
+
+
+def test_an_x_refusal_falls_back_to_the_outbox(world, monkeypatch):
+    w = world
+    for k, v in X_CREDS.items():
+        monkeypatch.setenv(k, v)
+    calls: list = []
+    monkeypatch.setattr(L.x_post, "urllib_transport", _x_transport(calls, upload_status=403))
+    rec = do_move(w)
+    assert rec.state == "done" and len(calls) == 1  # the post was never attempted
+    assert rec.post["channel"] == "outbox"
+    assert rec.post["reason"].startswith("x_failed: XPostError: media upload: X answered HTTP 403")
+    assert os.path.exists(rec.post["path"]) and os.path.exists(rec.post["card"])
+    month = datetime.now(timezone.utc).strftime("%Y-%m")
+    counter = json.loads((paths.network_dir("testnet") / f"x-posts-{month}.json").read_text())
+    assert len(counter["posts"]) == 1  # charged before the attempt: a refusal still counts
+    _assert_no_x_secret_on_disk()
 
 
 # ------------------------------------------------------------------ helpers

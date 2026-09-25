@@ -46,7 +46,7 @@ class FlyConfig:
     donor_sources: tuple[str, ...] = ()   # FLY_DONOR_SOURCES, comma separated
     rpc_urls: tuple[str, ...]    # FLY_RPC_URLS or the per-network defaults below
     expected_ledger_hash: str | None   # mainnet: the §4.4 constant; testnet: FLY_TESTNET_LEDGER_HASH (default the 2026-09-25 pin)
-    signing_account: str | None  # FLY_LFG_SIGNING_ACCOUNT: LFG's mint destination for this network (None = unknown → mint refused)
+    signing_account: str | None  # FLY_LFG_SIGNING_ACCOUNT: LFG's mint destination for this network (None = unknown → mint refused, on testnet too; never learned from LFG)
     regular_seed: str | None     # FLY_REGULAR_SEED (mainnet, from ~/lfg-fly/.env); testnet reads wallet.json instead
     x_monthly_budget: int = 40
 def load_config(env: Mapping[str, str] | None = None) -> FlyConfig
@@ -269,11 +269,19 @@ an UNKNOWN that cannot be resolved stops the loop with an outbox alert. 4. Read
 `/api/nfts`, `/api/economy` (cross-check `z_order` against the checkpoint's
 pinned order; refuse on mismatch), `/api/rarity/supply`. 5. Pick the hero
 (the record's, else the first mutable non-blank male character; `FLY_HERO`
-overrides). 6. Candidates + decide (temperature, date seed; 30-day tabu). 7.
-Write the record (`pending`) BEFORE submitting. 8. `POST /api/equip` with all
-changes; poll `/api/equip/{id}`; classify; update the record. 9. Post (outbox).
+overrides). 6. Candidates + decide (temperature, date seed; 30-day tabu); the
+rarity head is the one `fly retrain` named in its stamped pointer
+(`daily.latest_head`; a foreign stamp stops the loop with an outbox alert, §1;
+no pointer → rarity 0, disclosed). 7. Write the record (`pending`) BEFORE
+submitting. 8. `POST /api/equip` with all changes; poll `/api/equip/{id}`;
+classify; update the record. 9. Post: X through `voice.x_post.poster_for`
+(credentials + `FLY_X_MONTHLY_BUDGET`), else the outbox with the reason.
 `dry_run` stops after 7 with `state="dry_run"` and never calls equip. Logout in
 `finally`. Single-flight lock: `FLY_DATA_DIR/<network>/move.lock` (fcntl).
+
+`daily.claim` and `daily.retrain` (`fly claim`, `fly retrain`) honour the same
+kill switch: without `FLY_ENABLED=1` they raise `NotEnabled` before touching the
+chain, the key or LFG, and the CLI exits 2 (spec §4.4 step 2, §5 step 6).
 
 ## `lfg_fly/body/setup.py` and `cli_setup.py` (spec §5.3, §4.3)
 
@@ -282,10 +290,16 @@ address for Xaman on mainnet), `faucet` (testnet: create the master wallet via
 the faucet, fund it, store master_seed), `regular-key` (testnet: SetRegularKey
 signed by the master seed, once), `trustline`, `closet` (POST /api/closet →
 accept → until active), `mint --count N` (mint one at a time or bulk; sign the
-Payment under `mint_payment`; accept each delivery under `accept_offer`;
-respects the spend cap), `harvest` (every mutable non-hero character except
-the hero; wait for each), `status` (prints wallet, balance, characters,
-closet). Every signature goes through `Signer.sign_and_submit`.
+Payment under `mint_payment`, charged to the spend ledger under its sign
+request id so a resumed session that was already paid is never paid again;
+accept each delivery under `accept_offer`; respects the spend cap; the
+destination is `FLY_LFG_SIGNING_ACCOUNT` on every network), `accept NFT_ID...`
+(spec §5 step 3(b): an operator's zero-price, destination-locked sell offers
+from a `FLY_DONOR_SOURCES` wallet, read and accepted on-ledger, no LFG session;
+`async def accept(cfg, ledger, signer, nft_ids) -> {"accepted", "skipped"}`),
+`harvest` (every mutable non-hero character except the hero; wait for each),
+`status` (prints wallet, balance, characters, closet). Every signature goes
+through `Signer.sign_and_submit`.
 
 ## `lfg_fly/voice/` (spec §3.2 naming, §4.5)
 
@@ -297,7 +311,15 @@ def nearest_name(look: Look, critic_records: list[dict], threshold: float = 0.6)
 def before_after(before: Image.Image, after: Image.Image, day: int, changes: list[dict]) -> Image.Image   # 1200×675
 # post.py
 def compose(record: Record, name: str | None, day: int) -> str    # the §4.5 text; "untitled" when name is None
-def publish(cfg, text, card: Image.Image, record) -> dict         # no X credentials → outbox.write("post", …) with the PNG beside it
+def publish(cfg, text, card: Image.Image, record, *, poster=None, reason=None) -> dict
+    # with a poster → X ({"channel": "x", "result"}); a poster that raises, or none →
+    # outbox.write("post", …) with the PNG beside it and the reason in the payload
+# x_post.py (spec §4.5 "OAuth 1.0a, FLY_X_MONTHLY_BUDGET")
+def poster_for(cfg, env=None) -> tuple[Poster | None, str | None]
+    # (XPoster, None) when the four FLY_X_* credentials are set and this month's budget has
+    # room; else (None, "no_credentials" | "x_budget: …"). XPoster: OAuth 1.0a HMAC-SHA1,
+    # POST /2/media/upload (multipart PNG) then POST /2/tweets; the counter is
+    # FLY_DATA_DIR/<network>/x-posts-<YYYY-MM>.json, charged before the upload
 ```
 
 ## `lfg_fly/teacher/train.py` (spec §3.3, §3.4) and `fly train`

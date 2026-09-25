@@ -132,9 +132,10 @@ The fly is now a complete LFG user (`lfg_fly/body/`): it signs in through LFG's 
 provider with a RegularKey proof, mirrors LFG's Builder legality, scores every legal
 single-slot change with the taste head (at `c_ref`) and a live-rarity head, decides at
 temperature 0.15 with a date seed, records before it submits, equips in one `NFTokenModify`,
-reconciles by the design's table, and posts to an outbox when it has no X credentials. Its
-signer refuses anything outside the §4.3 policy table. `ecosystem.config.js` holds the three
-pm2 jobs. The whole surface is tested against a fake LFG API and a fake JSON-RPC ledger.
+reconciles by the design's table, and posts to X (OAuth 1.0a, within `FLY_X_MONTHLY_BUDGET`)
+when the `FLY_X_*` credentials are set, else to an outbox. Its signer refuses anything outside
+the §4.3 policy table. `ecosystem.config.js` holds the three pm2 jobs, all three behind
+`FLY_ENABLED=1`. The whole surface is tested against a fake LFG API and a fake JSON-RPC ledger.
 
 **Testnet rehearsal (LFG staging):** the fly's testnet wallet exists, faucet-funded, with its
 RegularKey set on-ledger by `fly setup regular-key`. Sign-in on staging still answers
@@ -157,8 +158,8 @@ nice -n 10 ionice -c3 .venv/bin/fly interact --device cuda   # Phase 0b: calibra
 #   then the Claude Code workflow .claude/workflows/critic.js over the batches
 .venv/bin/fly critic assemble --round r1    # data/critic/r1.jsonl + QC
 nice -n 10 ionice -c3 .venv/bin/fly train --round r1 --device cuda   # checkpoints/fly-v1, REPORT.md
-# the body (FLY_NETWORK=testnet, FLY_API_BASE=<staging>):
-.venv/bin/fly setup keygen|faucet|regular-key|trustline|closet|mint --count N|harvest --all|status
+# the body (FLY_NETWORK=testnet, FLY_API_BASE=<staging>, FLY_LFG_SIGNING_ACCOUNT=<LFG's SEED address>):
+.venv/bin/fly setup keygen|faucet|regular-key|trustline|closet|mint --count N|accept NFT_ID...|harvest --all|status
 .venv/bin/fly move --dry-run                # decide and record, never equip
 .venv/bin/fly move | claim | retrain        # the three pm2 jobs (ecosystem.config.js)
 ```

@@ -806,6 +806,35 @@ def test_spend_ledger_arguments():
     assert led.spent_drops == 0
 
 
+def test_spend_ledger_ties_a_charge_to_its_sign_request(_data_dir):
+    """A charge remembers the sign request it paid (`ref`), so a resumed mint session can
+    tell a paid request from an unpaid one and never pays twice (spec §4.2)."""
+    paid, other = "wc-" + "a" * 32, "wc-" + "b" * 32
+    led = S.SpendLedger("testnet", 5)
+    led.charge(1_000_000, ref=paid)
+    led.charge(1_000_000)  # a charge with no ref still counts against the cap
+    assert led.charged(paid) and not led.charged(other)
+    assert led.spent_drops == 2_000_000
+    data = json.loads(led.path.read_text())
+    assert [c.get("ref") for c in data["charges"]] == [paid, None]
+    with pytest.raises(ValueError):
+        led.charged("")
+    # a spend file from before refs existed reads as "nothing charged under any ref"
+    led.path.write_text(json.dumps({"network": "testnet", "spent_drops": 7,
+                                    "charges": [{"at": "x", "drops": 7}]}))
+    assert S.SpendLedger("testnet", 5).spent_drops == 7
+    assert not S.SpendLedger("testnet", 5).charged(paid)
+
+
+def test_sign_and_submit_charges_under_the_purposes_ref(signer, ledger):
+    ref = "wc-" + "c" * 32
+    purpose = S.Purpose.mint_payment(Decimal("10"), 3, LFG_SIGNER, ref=ref)
+    assert purpose.ref == ref and MINT.ref is None
+    run(signer.sign_and_submit(mint_tx(), purpose))
+    assert signer.spend.charged(ref) and not signer.spend.charged("wc-" + "d" * 32)
+    assert signer.spend.spent_drops == 30_000_000
+
+
 def test_xrp_to_drops_is_exact():
     assert S.xrp_to_drops(Decimal("10")) == 10_000_000
     assert S.xrp_to_drops(Decimal("0.000001")) == 1

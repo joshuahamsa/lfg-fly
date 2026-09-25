@@ -17,6 +17,9 @@ run the §4.4 chain-identity check, once per process (`ensure_identity`). The se
 closed before any simulation starts, so the token lives only as long as the reads need.
 Nothing here signs anything but the sign-in proof, and the seed is read (testnet
 `wallet.json`, mainnet `FLY_REGULAR_SEED`) and never written or logged.
+
+Both honour the kill switch (spec §4.4 step 2, §5 step 6): unless `FLY_ENABLED=1`, they
+refuse before the chain is asked anything, let alone a proof signed.
 """
 
 from __future__ import annotations
@@ -72,8 +75,20 @@ class CredentialsError(DailyError):
     """The fly's wallet or RegularKey seed cannot be found or is malformed."""
 
 
+class NotEnabled(DailyError):
+    """`FLY_ENABLED` is not `1`: the fly's jobs are switched off (spec §4.4)."""
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def require_enabled(cfg: FlyConfig, job: str) -> None:
+    """The kill switch (spec §4.4 step 2; §5 step 6 turns it on last): a job runs only
+    under `FLY_ENABLED=1`. Checked before the chain, the key or LFG is touched."""
+    if not cfg.enabled:
+        raise NotEnabled(f"{job}: FLY_ENABLED is not 1, the fly's jobs are switched off "
+                         "(spec §4.4)")
 
 
 # ------------------------------------------------------------------ .env and credentials
@@ -281,9 +296,11 @@ async def claim(cfg: FlyConfig, *, ledger: Ledger | None = None, signer: Signer 
     - any other refusal (`trustline_required`, `claim_unavailable`, `claim_unconfirmed`,
       ...): outbox alert, exit 1.
     - `failed`, or not settled within `timeout` (UNKNOWN): outbox alert, exit 1.
-    Non-LFG errors (the wire) propagate; the logout still runs.
+    Non-LFG errors (the wire) propagate; the logout still runs. Without `FLY_ENABLED=1`
+    nothing runs at all (`NotEnabled`, spec §4.4).
     """
     job = "fly-claim"
+    require_enabled(cfg, job)
     async with session(cfg, ledger=ledger, signer=signer) as (_ledger, client):
         try:
             body = await client.brix_claim()
@@ -376,8 +393,9 @@ def head_files(network: str, h: str) -> tuple[Path, Path]:
 
 
 def _meta_path(network: str, h: str) -> Path:
-    """The head's stamp and fit stats: `rarity-meta-<hash>.json`, deliberately outside the
-    `rarity-head-*.json` pattern the loop globs for the newest head."""
+    """The head's stamp and fit stats: `rarity-meta-<hash>.json`, beside the head's own
+    `rarity-head-<hash>.npz/.json` (which carry no stamp; `latest_head` is what the loop
+    reads, and it checks the stamp)."""
     return paths.snapshots_dir(network) / f"rarity-meta-{_hash_component(h)}.json"
 
 
@@ -437,7 +455,8 @@ def read_snapshot(path: str | Path, expect: Stamp) -> dict:
 
 def latest_head(network: str, expect: Stamp) -> dict | None:
     """The pointer `retrain` leaves for the loop: {snapshot_hash, snapshot, head, stamp,
-    stats, ...}; None when no retrain has run; StampMismatch on a foreign stamp."""
+    stats, ...}; None when no retrain has run; StampMismatch on a foreign stamp (spec §1:
+    a head fitted for another stack's supply is refused, and the loop stops)."""
     path = paths.snapshots_dir(network) / LATEST_HEAD
     if not path.is_file():
         return None
@@ -539,8 +558,10 @@ async def retrain(cfg: FlyConfig, brain, *, n: int = DEFAULT_N_LOOKS, lam: float
     caller's job, before the session opens. The session is closed once the supply is read.
     A supply stamped with another network is refused before anything is written. The
     sample's seed defaults to the snapshot hash, so a retrain is reproducible; a head that
-    already exists for this snapshot is kept unless `force`.
+    already exists for this snapshot is kept unless `force`. Without `FLY_ENABLED=1`
+    nothing runs at all (`NotEnabled`, spec §4.4).
     """
+    require_enabled(cfg, "fly-retrain")
     async with session(cfg, ledger=ledger, signer=signer) as (_ledger, client):
         supply = await client.rarity_supply()
         stamp = Stamp(network=cfg.network, lfg_api_base=cfg.api_base, wallet=str(client.wallet))
