@@ -223,6 +223,41 @@ def _cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_critic(args: argparse.Namespace) -> int:
+    import json
+
+    from lfg_fly import paths
+    from lfg_fly.teacher import critic as C
+    from lfg_fly.teacher.catalog import Catalog
+    from lfg_fly.teacher.render import load_zorder
+
+    cache = paths.network_dir("mainnet") / "catalog"
+    out = paths.network_dir("mainnet") / "renders" / f"critic-{args.round}"
+    if args.stage == "render":
+        cat = Catalog.from_json((cache / "catalog-male.json").read_text())
+        m = C.write_round(cat, cache, load_zorder(cache), out, args.round, n_pairs=args.pairs,
+                          seed=C.ROUND1_SEED if args.seed is None else args.seed,
+                          batch=C.BATCH if args.batch is None else args.batch)
+        print(f"{m['n_pairs']} pairs, {len(m['items'])} items, {len(m['batches'])} batches "
+              f"-> {out}")
+        return 0
+    m = json.loads((out / "manifest.json").read_text())
+    verdicts, bad = C.read_results(m, out / "results")
+    if bad:
+        print(f"{len(bad)} batch(es) missing or incomplete: {' '.join(sorted(bad))}")
+        if args.stage == "check":
+            return 2
+    recs = C.assemble(m, verdicts)
+    if args.stage == "check":
+        print(f"{len(verdicts)} verdicts over {len(m['items'])} items; {len(recs)} pairs judged")
+        return 0
+    summary = C.write_round_data(recs, paths.repo_root() / "data" / "critic", args.round)
+    (paths.repo_root() / "data" / "critic" / f"{args.round}-manifest.json").write_text(
+        json.dumps({k: v for k, v in m.items() if k != "batches"}, indent=1))
+    print(json.dumps(summary, indent=1, sort_keys=True))
+    return 0 if not bad else 2
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="fly", description="The fly: an LFG-dressing connectome")
     sub = parser.add_subparsers(dest="command")
@@ -267,6 +302,15 @@ def build_parser() -> argparse.ArgumentParser:
                         "first): the reproduction pre-flight. Stage C refuses a partial Stage B")
     p.add_argument("--stage", choices=["calib", "b", "c", "all"], default="all")
     p.set_defaults(func=_cmd_interact)
+
+    p = sub.add_parser("critic", help="the critic's round (spec §3.2): render cards, check or "
+                                      "assemble the agents' verdicts")
+    p.add_argument("stage", choices=["render", "check", "assemble"])
+    p.add_argument("--round", default="r1")
+    p.add_argument("--pairs", type=int, default=3000)
+    p.add_argument("--seed", type=int, default=None)
+    p.add_argument("--batch", type=int, default=None)
+    p.set_defaults(func=_cmd_critic)
 
     p = sub.add_parser("report", help="write docs/PHASE0.md (and PHASE0B.md) from data/")
     p.set_defaults(func=_cmd_report)
