@@ -1,0 +1,15 @@
+{
+ "a_wins": 0.5006666666666667,
+ "agreement": 0.74,
+ "flip_rate": 0.26,
+ "implied_ceiling": 0.8464101615137755,
+ "n_dropped": 78,
+ "n_dup_checked": 300,
+ "n_flip_checked": 300,
+ "n_pairs": 3000,
+ "strength_hist": {
+  "1": 1636,
+  "2": 1355,
+  "3": 9
+ }
+}
