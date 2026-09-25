@@ -1024,3 +1024,19 @@ def test_no_seed_is_ever_written_outside_wallet_json(fake_lfg):
             text = path.read_text(errors="replace")
             assert MASTER_SEED not in text and REGULAR_SEED not in text, path
     assert os.path.exists(paths.network_dir("testnet") / "setup-spend.json")
+
+
+def test_cli_reports_an_lfg_refusal_cleanly(monkeypatch, capsys):
+    """A 503 agent_disabled from LFG is a one-line message and exit 1, not a traceback."""
+    from lfg_fly.body.client import LfgError
+
+    monkeypatch.setenv("FLY_NETWORK", "testnet")
+
+    async def refused(*_a, **_k):
+        raise LfgError(503, "agent_disabled", {"code": "agent_disabled"})
+
+    monkeypatch.setattr(cli_setup, "_run_session", refused)
+    args = parser().parse_args(["setup", "status"])
+    assert args.func(args) == 1
+    err = capsys.readouterr().err
+    assert "503 agent_disabled" in err and "AGENT_SIGNIN_ENABLED" in err
