@@ -1,0 +1,60 @@
+{
+ "c_ref": 0.7,
+ "catalog_hash": "cbd9184be0c73a20cc18dc711220d2afd8bfafa7b0ef2dd89744911eef62c70f",
+ "codes": {
+  "allsens": "v1",
+  "odor": "v2"
+ },
+ "columns_hash": "7ce7d9fa4895d00301b09a01509bd785ea7f92bc790a3bef0c023578007624b1",
+ "created_at": "2026-09-25T16:26:50+00:00",
+ "feathers": {
+  "annotations": "2177e246113e4cfbf1e7772ec37c6da1955ff22e8063d0b1f833101f99a9a3b2",
+  "neurotransmitters": "95c9289220663abeb3409f3ad9e5a7f8a53f8093f5139d15502cd08da8879621",
+  "weights": "9b3beab17bad5f618be3f2c02d3139a8d07b822565919c013f1e5506d93e604b"
+ },
+ "graph_hash": "f2f62e0a0bbf145e285cfe6cd3b6ec9a02d328cd36639b675d491b2efc3bed1b",
+ "lfg_trait_config_commit": "0415a63afdcea11156b57169d34e38bb8d377adc",
+ "min_syn": 3,
+ "nt_missing": 502,
+ "setting": {
+  "brain": {
+   "alpha": 0.7,
+   "bias": 0.1,
+   "burn_in": 200,
+   "g_syn": 1.0,
+   "kind": "rate",
+   "noise": 0.0,
+   "refractory": 2,
+   "seed": 0,
+   "steps": 60,
+   "tau_ms": 20.0,
+   "trials": 1
+  },
+  "code": "all-sensory-brain",
+  "g_in": 2.0
+ },
+ "sign_map": {
+  "acetylcholine": 1,
+  "dopamine": 1,
+  "gaba": -1,
+  "glutamate": -1,
+  "histamine": -1,
+  "octopamine": 1,
+  "serotonin": 1,
+  "unclear": 1
+ },
+ "taste": {
+  "ci_hi": 0.689119170984456,
+  "ci_lo": 0.6068285065303805,
+  "gate_pass": true,
+  "head_heldout": 0.648972602739726,
+  "heldout": 0.648972602739726,
+  "labels": "/home/hamsa/lfg-fly/.claude/worktrees/fly-deployment-ce1519/data/critic/r1.jsonl",
+  "lam": 0.1,
+  "n_test": 584,
+  "n_train": 2338,
+  "round": "r1",
+  "taste_sd": 2.261612890856268
+ },
+ "version": "fly-v1"
+}

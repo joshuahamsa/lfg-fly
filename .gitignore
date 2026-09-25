@@ -25,3 +25,6 @@ venv/
 *.egg-info/
 build/
 dist/
+
+# Committed artifacts (spec §1): the taste head and its manifest are small and auditable.
+!checkpoints/**/*.npz

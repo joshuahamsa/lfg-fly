@@ -95,6 +95,53 @@ by the fly or by anything else we tried. The fly can learn the additive and broa
 of a taste, as well as a plain model can. If the critic's taste is mostly that, it would likely
 clear Gate B's bar. If it is interaction-heavy, it likely won't.
 
+## fly-v1: the critic's taste is learned (Gate B passed); the wiring still doesn't matter
+
+The critic phase went ahead on 2026-09-25. An offline Claude Code workflow
+([`.claude/workflows/critic.js`](.claude/workflows/critic.js)) judged **3,000 rendered pairs**
+under the design's rubric (appeal, a nameable idea, surprise), 40 pairs per agent, with 10% of
+pairs shown again swapped (position bias) and 10% judged by a second agent (agreement). The
+judgments are committed in [`data/critic/`](data/critic/). The taste head was then trained on
+them with the Phase 0 brain and scored against every §3.4 control. Full tables are in
+[`REPORT.md`](REPORT.md); the head and its manifest are [`checkpoints/fly-v1/`](checkpoints/fly-v1/).
+
+| Held-out, 584 pairs in 200 unseen look families | Accuracy (95% CI) | Fly − model (95% CI) |
+|---|---|---|
+| Critic's implied ceiling (agreement 0.74) | 0.846 | |
+| No brain (logistic regression on traits + pixel stats) | 0.668 (0.628–0.706) | −0.019 (−0.047 to +0.009) |
+| Sign-shuffled twin | 0.651 (0.611–0.689) | −0.002 (−0.031 to +0.027) |
+| **The fly (real MaleCNS wiring)** | **0.649 (0.607–0.689)** | |
+| MLP (256 hidden) on the same inputs | 0.644 (0.602–0.683) | +0.005 (−0.028 to +0.037) |
+| ≥5-synapse graph | 0.644 (0.600–0.683) | +0.005 (−0.012 to +0.024) |
+| Rewired twin (same degrees, wiring shuffled) | 0.642 (0.602–0.681) | +0.007 (−0.022 to +0.036) |
+| Eyes-only brain | 0.608 (0.565–0.652) | +0.041 (−0.005 to +0.086) |
+| Nose-only brain | 0.539 (0.500–0.579) | +0.110 (+0.060 to +0.161) |
+
+- **Gate B passes.** The go-live gate is a family-bootstrap CI lower bound above 0.55; the
+  fly's is 0.607. Best-of-6 agreement (round 2) has not been measured yet.
+- **The critic's taste is mostly learnable by a plain model**, as Phase 0b predicted. The fly
+  learns it as well as the no-brain regression, the MLP and its own rewired and sign-shuffled
+  twins; none of those differences is significant. It beats only the nose-only brain.
+- **The critic is noisy but not biased.** It chose the left side 50.1% of the time; 26% of the
+  flip-checked pairs (mostly close calls) came back the other way and were dropped; two agents
+  agree on 74% of pairs.
+
+### The body
+
+The fly is now a complete LFG user (`lfg_fly/body/`): it signs in through LFG's `agent`
+provider with a RegularKey proof, mirrors LFG's Builder legality, scores every legal
+single-slot change with the taste head (at `c_ref`) and a live-rarity head, decides at
+temperature 0.15 with a date seed, records before it submits, equips in one `NFTokenModify`,
+reconciles by the design's table, and posts to an outbox when it has no X credentials. Its
+signer refuses anything outside the §4.3 policy table. `ecosystem.config.js` holds the three
+pm2 jobs. The whole surface is tested against a fake LFG API and a fake JSON-RPC ledger.
+
+**Testnet rehearsal (LFG staging):** the fly's testnet wallet exists, faucet-funded, with its
+RegularKey set on-ledger by `fly setup regular-key`. Sign-in on staging still answers
+`503 agent_disabled` until `AGENT_SIGNIN_ENABLED=1` is set there (companion spec, rollout
+step 3), so the Closet, donor mints, harvests and the first move have not run yet. Nothing has
+touched mainnet.
+
 ## Reproduce
 
 ```bash
@@ -106,6 +153,14 @@ nice -n 10 ionice -c3 .venv/bin/fly catalog --api https://<lfg-api-base>
 nice -n 10 ionice -c3 .venv/bin/fly grid --device cuda   # Stages A, B, C and verdict (resumable)
 nice -n 10 ionice -c3 .venv/bin/fly interact --device cuda   # Phase 0b: calibration, B, C (resumable)
 .venv/bin/fly report                        # docs/PHASE0.md and docs/PHASE0B.md
+.venv/bin/fly critic render --round r1      # 3,000 pairs as A|B cards, batched 40 per agent
+#   then the Claude Code workflow .claude/workflows/critic.js over the batches
+.venv/bin/fly critic assemble --round r1    # data/critic/r1.jsonl + QC
+nice -n 10 ionice -c3 .venv/bin/fly train --round r1 --device cuda   # checkpoints/fly-v1, REPORT.md
+# the body (FLY_NETWORK=testnet, FLY_API_BASE=<staging>):
+.venv/bin/fly setup keygen|faucet|regular-key|trustline|closet|mint --count N|harvest --all|status
+.venv/bin/fly move --dry-run                # decide and record, never equip
+.venv/bin/fly move | claim | retrain        # the three pm2 jobs (ecosystem.config.js)
 ```
 
 Data lives in `FLY_DATA_DIR` (default `~/fly-data`), never in this repo. Everything runs
