@@ -137,11 +137,15 @@ when the `FLY_X_*` credentials are set, else to an outbox. Its signer refuses an
 the §4.3 policy table. `ecosystem.config.js` holds the three pm2 jobs, all three behind
 `FLY_ENABLED=1`. The whole surface is tested against a fake LFG API and a fake JSON-RPC ledger.
 
-**Testnet rehearsal (LFG staging):** the fly's testnet wallet exists, faucet-funded, with its
-RegularKey set on-ledger by `fly setup regular-key`. Sign-in on staging still answers
-`503 agent_disabled` until `AGENT_SIGNIN_ENABLED=1` is set there (companion spec, rollout
-step 3), so the Closet, donor mints, harvests and the first move have not run yet. Nothing has
-touched mainnet.
+**Testnet rehearsal (LFG staging), day 1 done (2026-09-25).** With `AGENT_SIGNIN_ENABLED=1`
+on staging, the fly signed in with its RegularKey proof, set its BRIX line, created and
+accepted its Closet, minted three donors (30 XRP; one male, two milady), harvested the two
+miladys (18 Closet units), decided a two-slot change in 1.4 s of brain time (18 candidates),
+equipped it in one committed `NFTokenModify`, wrote its record and its before → after card to
+the outbox, refused a second move the same day, and fitted its first rarity head from the
+live supply (held-out R² 0.88). BRIX claims stay disabled on staging (no distributor, spec
+§5.3). Six more daily moves and a killed mid-move run remain before the §5.3 exit criteria
+are met. Nothing has touched mainnet.
 
 ## Reproduce
 
