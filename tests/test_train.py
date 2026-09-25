@@ -233,7 +233,7 @@ def test_train_without_controls_writes_results_checkpoint_and_report(tmp_path, m
 
     # results.json: the fly's held-out number with its CI, the gate, the labels' counts
     out = root / "data" / "train" / "fly-test" / "results.json"
-    on_disk = json.loads(out.read_text())
+    on_disk = json.loads(out.read_text(encoding="utf-8"))
     assert on_disk == json.loads(json.dumps(results))
     fly = results["fly"]
     assert 0.0 <= fly["ci_lo"] <= fly["heldout"] <= fly["ci_hi"] <= 1.0
@@ -280,7 +280,7 @@ def test_train_without_controls_writes_results_checkpoint_and_report(tmp_path, m
                                atol=1e-6)
 
     # REPORT.md: the gate line, plain either way, and the fact that no control was run
-    text = (root / "REPORT.md").read_text()
+    text = (root / "REPORT.md").read_text(encoding="utf-8")
     verdict = "PASS" if results["gate"]["pass"] else "FAIL"
     assert f"**Gate B: {verdict}**" in text
     assert f"{fly['heldout']:.3f}" in text and f"{fly['ci_lo']:.3f}" in text
@@ -354,7 +354,7 @@ def test_train_with_controls_scores_every_control_on_the_same_test_pairs(tmp_pat
     assert [s for _, s in featured] == [SETTING, NOSE, SETTING, SETTING, SETTING]
     assert ctl["rewired"]["graph_hash"] == twin_r and ctl["sign_shuffled"]["graph_hash"] == twin_s
 
-    text = (root / "REPORT.md").read_text()
+    text = (root / "REPORT.md").read_text(encoding="utf-8")
     for label in ("Random mover", "No brain", "MLP", "Rewired", "Sign-shuffled", "Eyes-only",
                   "Nose-only", "5-synapse", "Critic agreement"):
         assert label in text
@@ -423,7 +423,7 @@ def test_write_report_renders_a_fixture_dict(tmp_path):
     results = _fixture(gate_pass=True)
     out = tmp_path / "REPORT.md"
     TR.write_report(results, QC, out)
-    text = out.read_text()
+    text = out.read_text(encoding="utf-8")
     assert text.startswith("# ")
     assert "**Gate B: PASS**" in text and "goes live as a chooser" in text
     assert "0.660" in text and "0.630" in text and "0.690" in text  # the fly and its CI
@@ -451,12 +451,13 @@ def test_write_report_renders_a_fixture_dict(tmp_path):
 
     failing = _fixture(gate_pass=False)
     TR.write_report(failing, QC, out)
-    text = out.read_text()
+    text = out.read_text(encoding="utf-8")
     assert "**Gate B: FAIL**" in text and "does not go live as a chooser" in text
     assert "beats its own raw inputs" not in text.replace("does not beat", "")
     # without a QC file the report says so rather than inventing numbers
     TR.write_report(failing, {}, out)
-    assert "no qc" in out.read_text().lower() or "no quality-control" in out.read_text().lower()
+    lowered = out.read_text(encoding="utf-8").lower()
+    assert "no qc" in lowered or "no quality-control" in lowered
 
 
 def test_write_report_before_a_checkpoint_exists(tmp_path):
@@ -464,7 +465,7 @@ def test_write_report_before_a_checkpoint_exists(tmp_path):
     del results["checkpoint"]
     out = tmp_path / "REPORT.md"
     TR.write_report(results, QC, out)
-    assert "not written" in out.read_text().lower()
+    assert "not written" in out.read_text(encoding="utf-8").lower()
 
 
 # ---------------------------------------------------------------- the CLI
@@ -501,7 +502,8 @@ def test_cmd_train_runs_the_round_end_to_end(tmp_path, monkeypatch, capsys):
     assert "Gate B:" in out and "REPORT.md" in out
     assert (root / "REPORT.md").exists()
     assert (root / "checkpoints" / "fly-test" / "manifest.json").exists()
-    results = json.loads((root / "data" / "train" / "fly-test" / "results.json").read_text())
+    results_path = root / "data" / "train" / "fly-test" / "results.json"
+    results = json.loads(results_path.read_text(encoding="utf-8"))
     assert results["controls_run"] is False and results["setting"] == SETTING.as_dict()
     assert results["round"] == "r1" and results["version"] == "fly-test"
 

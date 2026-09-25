@@ -15,6 +15,7 @@ import os
 import stat
 from contextlib import asynccontextmanager
 from dataclasses import replace
+from pathlib import Path
 
 import fake_lfg as FL
 import fake_rpc as FR
@@ -608,19 +609,40 @@ def test_mint_refuses_without_a_pinned_signing_account_on_mainnet(fake_lfg):
     assert state.mint_sessions == {}
 
 
-def test_mint_testnet_pins_the_destination_from_the_first_session(fake_lfg):
+def test_mint_refuses_without_a_pinned_signing_account_on_testnet_too(fake_lfg):
+    """Spec §4.3: the mint destination is pinned per network in the fly's config. It is never
+    learned from LFG's own txjson (that would compare LFG's word to itself), on testnet as on
+    mainnet; the rehearsal pins staging's SEED address by hand (FLY_LFG_SIGNING_ACCOUNT)."""
     base, state = fake_lfg
 
     async def go():
         async with session(base, state, cfg_for(base, state, signing_account=None)) as s:
-            out = await s.mint(count=1)
-            return out, s.cfg.signing_account, s.rpc
+            await s.mint(count=1)
 
-    out, pinned, rpc = run(go())
-    assert out["obtained"] == 1 and pinned == state.signing_account
-    assert out["pinned_signing_account"] == state.signing_account
-    payment = next(t for t in rpc.txs.values() if t["TransactionType"] == "Payment")
-    assert payment["Destination"] == state.signing_account
+    with pytest.raises(SU.SetupError, match="FLY_LFG_SIGNING_ACCOUNT"):
+        run(go())
+    assert state.mint_sessions == {}  # refused before any session was opened
+    assert not hasattr(SU.Setup, "pinned_signing_account")
+
+
+def test_mint_refuses_a_destination_that_differs_from_the_pin(fake_lfg):
+    """The pin is what the signer compares LFG's txjson against: a session whose Payment
+    goes anywhere else is rejected on its sign request and nothing is submitted."""
+    base, state = fake_lfg
+    cfg = cfg_for(base, state)  # pins today's signing account
+    state.signing_account = Wallet.create().address  # LFG now quotes another destination
+    seen: dict = {}
+
+    async def go():
+        async with session(base, state, cfg) as s:
+            seen["rpc"] = s.rpc
+            await s.mint(count=1)
+
+    with pytest.raises(PolicyError, match="Destination"):
+        run(go())
+    (row,) = [r for r in state.sign_requests.values() if r["purpose"] == "tx"]
+    assert row["state"] == "rejected"
+    assert submitted_types(seen["rpc"]) == []
 
 
 def test_mint_refuses_a_non_xrp_price(fake_lfg):
@@ -664,6 +686,191 @@ def test_mint_resumes_an_active_session(fake_lfg):
     assert out["obtained"] == 1 and out["minted"][0]["nft_id"] == "9" * 64
     assert out["minted"][0]["session"] == first["id"]
     assert len(state.mint_sessions) == 1
+
+
+async def _crash_after_paying(s: SU.Setup, state: FL.FakeLfgState) -> tuple[str, str, int]:
+    """Run `mint` so that the Payment validates on the ledger and is charged, but the
+    `sign_result` answer never reaches LFG (the process died there): the session stays
+    `awaiting_payment` with its sign row `pending`. Returns (pay_sid, payment hash, spent)."""
+    real = s.client.sign_result
+    lost = {"once": True}
+
+    async def sign_result(sid, **kw):
+        row = state.sign_requests[sid]
+        if lost["once"] and kw.get("tx_hash") and row["txjson"]["TransactionType"] == "Payment":
+            lost["once"] = False
+            raise OSError("connection reset")  # the answer never reached LFG
+        return await real(sid, **kw)
+
+    s.client.sign_result = sign_result  # type: ignore[method-assign]
+    with pytest.raises(OSError):
+        await s.mint(count=1)
+    payments = [h for h, t in s.rpc.txs.items() if t["TransactionType"] == "Payment"]
+    assert len(payments) == 1
+    (sess,) = state.mint_sessions.values()
+    assert sess["state"] == "awaiting_payment"
+    pay_sid = LfgClient.sign_id(sess["payment_link"])
+    assert state.sign_requests[pay_sid]["state"] == "pending"
+    assert s.signer.spend.charged(pay_sid)
+    return pay_sid, payments[0], s.signer.spend.spent_drops
+
+
+def test_mint_resume_never_pays_a_charged_session_again(fake_lfg):
+    """Spec §4.2 "never blindly re-submit": a resumed `awaiting_payment` session whose payment
+    is on the spend ledger is not paid again; the resume waits for LFG to detect the
+    payment on-ledger (docs/lfg-api.md §7), then carries on to the accept."""
+    base, state = fake_lfg
+    state.mint_queue.append({"nft_id": "9" * 64, "body_type": "male"})
+
+    async def go():
+        async with session(base, state) as s:
+            pay_sid, digest, spent_after_crash = await _crash_after_paying(s, state)
+
+            async def lfg_detects_the_payment(_seconds: float) -> None:
+                if state.sign_requests[pay_sid]["state"] == "pending":
+                    # LFG's own watcher, off the ledger (the wrapper passes this through)
+                    await s.client.sign_result(pay_sid, tx_hash=digest)
+
+            s.sleep = lfg_detects_the_payment
+            out = await s.mint(count=1)
+            return out, s.rpc, spent_after_crash, s.signer.spend.spent_drops
+
+    out, rpc, spent_after_crash, spent = run(go())
+    assert out["obtained"] == 1 and out["minted"][0]["nft_id"] == "9" * 64
+    assert submitted_types(rpc) == ["Payment", "NFTokenAcceptOffer"]  # exactly one Payment
+    assert spent == spent_after_crash == 10_000_000
+    assert len(state.mint_sessions) == 1
+    assert state.mint_sessions[out["minted"][0]["session"]]["state"] == "done"
+
+
+def test_mint_resume_of_a_charged_session_fails_clearly_if_lfg_never_sees_it(fake_lfg):
+    base, state = fake_lfg
+
+    async def go():
+        async with session(base, state) as s:
+            pay_sid, _digest, spent_after_crash = await _crash_after_paying(s, state)
+            s.payment_timeout = 0.5  # LFG's watcher never comes
+            with pytest.raises(SU.SetupError, match="already charged") as info:
+                await s.mint(count=1)
+            return pay_sid, str(info.value), s.rpc, spent_after_crash, s.signer.spend.spent_drops
+
+    pay_sid, message, rpc, spent_after_crash, spent = run(go())
+    assert pay_sid in message and "cancel" in message
+    assert submitted_types(rpc) == ["Payment"]  # still exactly one
+    assert spent == spent_after_crash == 10_000_000
+    (sess,) = state.mint_sessions.values()
+    assert sess["state"] == "awaiting_payment"
+    assert state.sign_requests[pay_sid]["state"] == "pending"  # never rejected either
+
+
+# ------------------------------------------------------------------ accept (§5 step 3(b))
+
+DONOR = Wallet.from_seed(seed_for("operator-donor")).address
+STRANGER = Wallet.from_seed(seed_for("a-stranger")).address
+
+
+def nft(tag: int) -> str:
+    """A 64-hex NFTokenID: flags/fee, a 20-byte issuer, taxon, serial `tag`."""
+    return f"00080000{'11' * 20}{0:08X}{tag:08X}"
+
+
+def offer(index: str, *, owner: str, amount: str = "0", destination: str = FLY) -> dict:
+    return {"nft_offer_index": index, "amount": amount, "flags": 1, "owner": owner,
+            "destination": destination}
+
+
+def accept_cfg(**over) -> FlyConfig:
+    kw = dict(network="testnet", api_base="http://lfg.invalid", donor_sources=(DONOR,),
+              expected_ledger_hash=FR.TESTNET_HASH, setup_max_xrp=0.0)
+    kw.update(over)
+    return FlyConfig(**kw)
+
+
+async def run_accept(cfg: FlyConfig, nft_ids: list[str], prepare) -> tuple[dict, FR.FakeRpc]:
+    async with FR.FakeRpc() as rpc:
+        rpc.add_account(FLY, sequence=10)
+        prepare(rpc)
+        ledger = Ledger([rpc.url], "testnet", timeout=5.0, poll_interval=0.0)
+        try:
+            signer = Signer(REGULAR_SEED, FLY, ledger, cfg)
+            return await SU.accept(cfg, ledger, signer, nft_ids), rpc
+        finally:
+            await ledger.close()
+
+
+def test_accept_takes_a_donors_offer_and_skips_every_other():
+    """Spec §5 step 3(b): the operator's destination-locked, zero-price offer is accepted
+    on-ledger with the fly's key, no LFG session; an offer from a wallet outside
+    FLY_DONOR_SOURCES, a priced one, an NFT already owned and a malformed id are reported,
+    never signed."""
+    donated, foreign, priced, owned, unlocked = nft(1), nft(2), nft(3), nft(4), nft(5)
+    o1, o2, o3, o5 = ("A1" * 32, "B2" * 32, "C3" * 32, "E5" * 32)
+
+    def prepare(rpc: FR.FakeRpc) -> None:
+        rpc.add_nft(FLY, owned, uri=None)
+        rpc.offers[donated] = [offer(o1, owner=DONOR)]
+        rpc.offers[foreign] = [offer(o2, owner=STRANGER)]
+        rpc.offers[priced] = [offer(o3, owner=DONOR, amount="1000000")]
+        rpc.offers[unlocked] = [offer(o5, owner=DONOR, destination=STRANGER)]
+
+    out, rpc = run(run_accept(accept_cfg(), [donated, foreign, priced, owned, unlocked, "nope"],
+                              prepare))
+    assert [a["nft_id"] for a in out["accepted"]] == [donated]
+    (acc,) = out["accepted"]
+    assert acc["offer"] == o1 and acc["owner"] == DONOR and len(acc["hash"]) == 64
+    assert submitted_types(rpc) == ["NFTokenAcceptOffer"]
+    (tx,) = rpc.txs.values()
+    assert tx["NFTokenSellOffer"] == o1 and tx["Account"] == FLY
+    assert acc["hash"] == tx["hash"]
+    skipped = {s["nft_id"]: s["why"] for s in out["skipped"]}
+    assert set(skipped) == {foreign, priced, owned, unlocked, "nope"}
+    assert STRANGER in skipped[foreign] and "FLY_DONOR_SOURCES" in skipped[foreign]
+    assert "1000000" in skipped[priced]
+    assert skipped[owned] == "already owned by the fly"
+    assert "no sell offers" not in skipped[unlocked] and STRANGER in skipped[unlocked]
+    assert "NFTokenID" in skipped["nope"]
+    # no LFG was involved, and the sell offers were read on-ledger (twice for the accepted
+    # one: once to pick it, once by the signer's own policy)
+    assert len(rpc.calls_for("nft_sell_offers")) == 5
+
+
+def test_accept_refuses_without_donor_sources_or_ids():
+    async def go(cfg, ids):
+        async with FR.FakeRpc() as rpc:
+            rpc.add_account(FLY)
+            ledger = Ledger([rpc.url], "testnet", timeout=5.0, poll_interval=0.0)
+            try:
+                signer = Signer(REGULAR_SEED, FLY, ledger, cfg)
+                await SU.accept(cfg, ledger, signer, ids)
+            finally:
+                await ledger.close()
+            return rpc
+
+    with pytest.raises(SU.SetupError, match="FLY_DONOR_SOURCES"):
+        run(go(accept_cfg(donor_sources=()), [nft(1)]))
+    with pytest.raises(SU.SetupError, match="NFTokenID"):
+        run(go(accept_cfg(), []))
+
+
+def test_accept_lets_the_signer_refuse_a_stale_offer():
+    """The signer re-reads the offer on-ledger under the §4.3 policy: an offer that changed
+    between the pick and the signature (here: gone) is a PolicyError, not a submission."""
+    donated = nft(7)
+
+    def prepare(rpc: FR.FakeRpc) -> None:
+        reads = {"n": 0}
+        good = [offer("D7" * 32, owner=DONOR)]
+
+        def flaky(params: dict) -> dict:
+            reads["n"] += 1
+            if reads["n"] == 1:
+                return {"nft_id": params["nft_id"], "offers": good}
+            raise FR.RpcError("objectNotFound", "The requested object was not found.")
+
+        rpc.answer("nft_sell_offers", flaky)
+
+    with pytest.raises(PolicyError, match="not on the ledger"):
+        run(run_accept(accept_cfg(), [donated], prepare))
 
 
 # ------------------------------------------------------------------ harvest
@@ -942,6 +1149,50 @@ def test_cli_exit_codes(monkeypatch, capsys):
     args = parser().parse_args(["setup", "status"])
     assert args.func(args) == 1
     assert "faucet" in capsys.readouterr().err
+
+
+def test_cli_accept_takes_ids_and_needs_donor_sources(monkeypatch, capsys):
+    args = parser().parse_args(["setup", "accept", nft(1), nft(2)])
+    assert args.setup_command == "accept" and args.nft_ids == [nft(1), nft(2)]
+    with pytest.raises(SystemExit):
+        parser().parse_args(["setup", "accept"])
+    monkeypatch.setenv("FLY_NETWORK", "testnet")
+    monkeypatch.delenv("FLY_DONOR_SOURCES", raising=False)
+    assert args.func(args) == 1  # refused before the ledger is opened
+    assert "FLY_DONOR_SOURCES" in capsys.readouterr().err
+
+    seen: dict = {}
+
+    async def fake_run_ledger(cfg, fn):
+        seen["cfg"] = cfg
+        return seen["answer"]
+
+    monkeypatch.setattr(cli_setup, "_run_ledger", fake_run_ledger)
+    monkeypatch.setenv("FLY_DONOR_SOURCES", DONOR)
+    seen["answer"] = {"accepted": [{"nft_id": nft(1), "offer": "A1" * 32, "owner": DONOR,
+                                    "hash": "F" * 64}],
+                      "skipped": [{"nft_id": nft(2), "why": "no sell offers on-ledger"}]}
+    assert args.func(args) == 1  # a skipped id is never silent
+    out = capsys.readouterr().out
+    assert nft(1) in out and "no sell offers" in out and seen["cfg"].donor_sources == (DONOR,)
+    seen["answer"] = {"accepted": [{"nft_id": nft(1), "offer": "A1" * 32, "owner": DONOR,
+                                    "hash": "F" * 64}], "skipped": []}
+    assert args.func(args) == 0
+
+
+def test_cli_tests_never_read_the_operators_dotenv(monkeypatch):
+    """The autouse conftest fixture points every CLI's DOTENV at a missing file, so a real
+    ~/lfg-fly/.env (the RegularKey seed, FLY_ENABLED=1) can never leak into the test
+    process (contract: tests never touch ~/fly-data or the network)."""
+    from lfg_fly.body import cli_daily, cli_move
+
+    for module in (cli_setup, cli_daily, cli_move):
+        assert not module.DOTENV.exists()
+        assert module.DOTENV != Path.home() / "lfg-fly" / ".env"
+    monkeypatch.setenv("FLY_NETWORK", "testnet")
+    monkeypatch.delenv("FLY_REGULAR_SEED", raising=False)
+    parser().parse_args(["setup", "keygen"]).func(parser().parse_args(["setup", "keygen"]))
+    assert "FLY_REGULAR_SEED" not in os.environ
 
 
 def test_load_env_file(tmp_path):

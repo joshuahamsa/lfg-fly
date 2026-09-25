@@ -162,6 +162,19 @@ def cmd_harvest(args: argparse.Namespace, cfg: FlyConfig) -> int:
 
 
 @_guarded
+def cmd_accept(args: argparse.Namespace, cfg: FlyConfig) -> int:
+    """An operator's donors, accepted on-ledger (spec §5 step 3(b)); no LFG session. Exit 1
+    when any requested NFT was not accepted, so a skipped one is never silent."""
+    if not cfg.donor_sources:
+        raise SU.SetupError("FLY_DONOR_SOURCES is empty: `fly setup accept` takes offers only "
+                            "from the wallets it lists (spec §4.3, §5 step 3(b))")
+    out = asyncio.run(_run_ledger(
+        cfg, lambda ledger: SU.accept(cfg, ledger, SU.build_signer(cfg, ledger), args.nft_ids)))
+    _print(out)
+    return 0 if not out["skipped"] else 1
+
+
+@_guarded
 def cmd_status(args: argparse.Namespace, cfg: FlyConfig) -> int:
     _print(asyncio.run(_run_session(cfg, lambda s: s.status())))
     return 0
@@ -174,6 +187,7 @@ COMMANDS: dict[str, Callable[[argparse.Namespace], int]] = {
     "trustline": cmd_trustline,
     "closet": cmd_closet,
     "mint": cmd_mint,
+    "accept": cmd_accept,
     "harvest": cmd_harvest,
     "status": cmd_status,
 }
@@ -185,7 +199,8 @@ def _dispatch(args: argparse.Namespace) -> int:
 
 def register(sub: argparse._SubParsersAction) -> None:
     p = sub.add_parser("setup", help="one-off setup steps (spec §5.3, §5.4): keygen, faucet, "
-                                     "regular-key, trustline, closet, mint, harvest, status")
+                                     "regular-key, trustline, closet, mint, accept, harvest, "
+                                     "status")
     steps = p.add_subparsers(dest="setup_command", required=True)
     s = steps.add_parser("keygen", help="a new RegularKey (testnet: into wallet.json; "
                                         "mainnet: shown once for Xaman and .env)")
@@ -198,6 +213,9 @@ def register(sub: argparse._SubParsersAction) -> None:
     s.add_argument("--count", type=int, required=True)
     s.add_argument("--bulk", action="store_true", help="one bulk-mint job instead of singles")
     s.add_argument("--body", default=None, help="keep minting until this body arrives")
+    s = steps.add_parser("accept", help="accept an operator's zero-price sell offers on-ledger "
+                                        "(owner in FLY_DONOR_SOURCES; spec §5 step 3(b))")
+    s.add_argument("nft_ids", nargs="+", help="the NFTokenIDs the operator offered")
     s = steps.add_parser("harvest", help="harvest donors into the Closet")
     g = s.add_mutually_exclusive_group(required=True)
     g.add_argument("--all", action="store_true", help="every mutable non-hero character")

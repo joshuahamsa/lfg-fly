@@ -409,6 +409,35 @@ def test_publish_with_a_poster_posts_and_skips_the_outbox(tmp_path, no_x_env):
     assert text == "hi" and png[:8] == b"\x89PNG\r\n\x1a\n"
 
 
+def test_publish_reports_the_reason_it_was_given(tmp_path, monkeypatch):
+    """The loop passes `x_post.poster_for`'s reason (no credentials, or the month's budget);
+    it lands in the result and the payload as is."""
+    for k in ("FLY_X_API_KEY", "FLY_X_API_SECRET", "FLY_X_ACCESS_TOKEN", "FLY_X_ACCESS_SECRET"):
+        monkeypatch.setenv(k, "x")
+    calls: list = []
+    got = post.publish(FakeConfig(), "hi", _solid((1200, 675), (0, 0, 0)), FakeRecord(),
+                       writer=_fake_writer(tmp_path, calls), reason="x_budget: 40 of 40 posts")
+    assert got["channel"] == "outbox" and got["reason"] == "x_budget: 40 of 40 posts"
+    assert calls[0][2]["reason"] == "x_budget: 40 of 40 posts"
+
+
+def test_publish_falls_back_to_the_outbox_when_the_poster_fails(tmp_path, no_x_env):
+    """X's refusal never loses the post: the text and the card go to the outbox with the
+    failure as the reason (§4.5)."""
+    calls: list = []
+
+    def poster(text, png):
+        raise RuntimeError("media upload: X answered HTTP 403: forbidden")
+
+    got = post.publish(FakeConfig(), "hi", _solid((1200, 675), (9, 9, 9)), FakeRecord(),
+                       writer=_fake_writer(tmp_path, calls), poster=poster)
+    assert got["channel"] == "outbox"
+    assert got["reason"] == "x_failed: RuntimeError: media upload: X answered HTTP 403: forbidden"
+    (network, kind, payload, _when), = calls
+    assert kind == "post" and payload["reason"] == got["reason"] and payload["text"] == "hi"
+    assert (tmp_path / "outbox" / "20260925T150000Z-post.png").exists()
+
+
 def test_publish_reads_x_credentials_from_the_environment(monkeypatch):
     for k in ("FLY_X_API_KEY", "FLY_X_API_SECRET", "FLY_X_ACCESS_TOKEN", "FLY_X_ACCESS_SECRET"):
         monkeypatch.delenv(k, raising=False)

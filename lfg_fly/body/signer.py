@@ -203,6 +203,7 @@ class Purpose:
     quantity: int = 1  # mint_payment: 1, or the bulk job's quantity
     destination: str | None = None  # mint_payment: LFG's signing account for this network
     pay_with: str = "XRP"  # mint_payment: the session's pay_with; anything but XRP is refused
+    ref: str | None = None  # mint_payment: the sign request id the charge is tied to
     nft_id: str | None = None  # accept_offer: the NFT the offer sells
     allowed_owners: frozenset[str] = field(default_factory=frozenset)  # accept_offer: extras
     currency: str | None = None  # trustset: the BRIX currency code / hex
@@ -239,9 +240,12 @@ class Purpose:
 
     @classmethod
     def mint_payment(cls, pay_amount_xrp: Decimal | str | int, quantity: int, destination: str,
-                     pay_with: str = "XRP") -> Purpose:
+                     pay_with: str = "XRP", ref: str | None = None) -> Purpose:
+        """`ref` names the LFG sign request the payment answers; the spend ledger records
+        it with the charge, so a resumed session can tell a paid request from an unpaid
+        one (spec §4.2 "never blindly re-submit")."""
         return cls("mint_payment", pay_amount_xrp=pay_amount_xrp,  # type: ignore[arg-type]
-                   quantity=quantity, destination=destination, pay_with=pay_with)
+                   quantity=quantity, destination=destination, pay_with=pay_with, ref=ref)
 
     @classmethod
     def accept_offer(cls, nft_id: str, allowed_owners: Iterable[str] = ()) -> Purpose:
@@ -300,18 +304,28 @@ class SpendLedger:
                 f"({self.cap_drops} drops) on {self.network}"
             )
 
-    def charge(self, drops: int) -> None:
-        """Record `drops` spent; raises PolicyError past the cap (atomic tmp + rename)."""
+    def charge(self, drops: int, ref: str | None = None) -> None:
+        """Record `drops` spent against `ref` (the sign request the payment answers, or
+        None); raises PolicyError past the cap (atomic tmp + rename)."""
         self.check(drops)
         data = self._load()
         data["spent_drops"] += drops
         data["charges"].append(
-            {"at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "drops": drops}
+            {"at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "drops": drops,
+             "ref": ref}
         )
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
         os.replace(tmp, self.path)
+
+    def charged(self, ref: str) -> bool:
+        """True when a charge for `ref` is on record: the payment for that sign request was
+        signed and submitted (or the process died between the charge and the submit), so
+        it must never be paid again. Never writes."""
+        if not isinstance(ref, str) or not ref:
+            raise ValueError("ref must be a non-empty string")
+        return any(c.get("ref") == ref for c in self._load().get("charges") or [])
 
 
 # ---------------------------------------------------------------- Signer
@@ -531,7 +545,8 @@ class Signer:
         """autofill -> policy -> simulate -> sign -> submit_and_wait (spec §4.3).
 
         Returns {"hash": <64 upper hex>, "result": <the validated result>}. The spend cap is
-        charged just before a mint payment is submitted, so a crash mid-submit counts as spent.
+        charged just before a mint payment is submitted, under `purpose.ref`, so a crash
+        mid-submit counts as spent and the request is known to be paid on a resume.
         """
         if not isinstance(purpose, Purpose):
             raise PolicyError("purpose must be a Purpose")
@@ -554,7 +569,7 @@ class Signer:
         signed = self._sign(unsigned)
         blob = encode(signed)
         if purpose.kind == "mint_payment":
-            self.spend.charge(int(tx["Amount"]))
+            self.spend.charge(int(tx["Amount"]), ref=purpose.ref)
         result = await self._ledger.submit_and_wait(blob)
         digest = tx_hash(blob)
         got = result.get("hash") if isinstance(result, dict) else None

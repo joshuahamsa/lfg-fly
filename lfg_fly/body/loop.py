@@ -16,7 +16,12 @@
    temperature τ with the date seed, at most three greedy steps, the 30-day tabu.
 6. Write `records/<date>.json` BEFORE submitting.
 7. One `POST /api/equip` with every change, then poll `/api/equip/{id}` and classify.
-8. Post (§4.5): the card and text go to X when credentials exist, else to the outbox.
+8. Post (§4.5): the card and text go to X when the `FLY_X_*` credentials exist and the
+   month's `FLY_X_MONTHLY_BUDGET` has room (`voice.x_post`), else to the outbox.
+
+The rarity head of step 5 is the one `fly retrain` left through its stamped pointer
+(`daily.latest_head`); a head stamped for another stack stops the loop with an outbox
+alert, exactly like a foreign record (§1).
 
 `--dry-run` stops after step 6 with `state="dry_run"` and never calls equip.
 """
@@ -42,7 +47,7 @@ import numpy as np
 from PIL import Image
 
 from lfg_fly import paths
-from lfg_fly.body import outbox, reconcile, records
+from lfg_fly.body import daily, outbox, reconcile, records
 from lfg_fly.body.candidates import Candidate, changes_between
 from lfg_fly.body.client import LfgClient, LfgError
 from lfg_fly.body.decide import considered_of, plan_day
@@ -57,6 +62,7 @@ from lfg_fly.voice import (
     nearest_name,
     publish,
     with_from,
+    x_post,
 )
 
 log = logging.getLogger(__name__)
@@ -218,19 +224,24 @@ def pick_hero(characters: list[dict], requested: str | None, remembered: str | N
     raise LoopRefused(f"no hero: no mutable, non-blank {HERO_BODY} character in this wallet")
 
 
-def load_rarity_head(network: str) -> readout.RarityHead | None:
-    """The newest nightly rarity head under `snapshots/` (`rarity-head-<hash>.npz/.json`,
-    spec §2 Readout), or None when no retrain has run yet."""
-    directory = paths.snapshots_dir(network)
-    if not directory.is_dir():
+def load_rarity_head(network: str, stamp: Stamp) -> readout.RarityHead | None:
+    """The nightly rarity head `fly retrain` left for this stack (spec §2 Readout), or None
+    when no retrain has run yet.
+
+    It is reached through the stamped pointer `snapshots/latest-rarity-head.json`
+    (`daily.latest_head`): spec §1 stamps every rarity-head artifact with {network,
+    lfg_api_base, wallet} and loaders refuse a mismatch (`StampMismatch`). The head files
+    themselves carry no stamp, so a stray `rarity-head-*.npz` without the pointer is never
+    picked up. A pointer whose head does not answer to its snapshot hash is a ValueError.
+    """
+    doc = daily.latest_head(network, stamp)
+    if doc is None:
         return None
-    candidates = [p for p in directory.glob("rarity-head-*.json") if p.is_file()]
-    if not candidates:
-        return None
-    newest = max(candidates, key=lambda p: (p.stat().st_mtime, p.name))
-    head = readout.load_head(newest.with_suffix(".npz"))
-    if not isinstance(head, readout.RarityHead):
-        raise ValueError(f"{newest}: not a rarity head")
+    h = str(doc.get("snapshot_hash") or "")
+    npz, _js = daily.head_files(network, h)  # ValueError on a malformed hash
+    head = readout.load_head(npz)
+    if not isinstance(head, readout.RarityHead) or head.snapshot_hash != h:
+        raise ValueError(f"{npz}: not the rarity head for snapshot {h[:16]} the pointer names")
     return head
 
 
@@ -502,7 +513,13 @@ async def _day(cfg: Any, brain: Any, client: LfgClient, ledger: Any, *, dry_run:
     listed: set[tuple[str, str]] = set()  # the client has no Closet Market read; LFG guards
 
     # 4–5. candidates and the decision (§4.1 steps 4–5)
-    head = rarity_head if rarity_head is not None else load_rarity_head(network)
+    try:
+        head = rarity_head if rarity_head is not None else load_rarity_head(network, stamp)
+    except StampMismatch as e:
+        _alert(cfg, "stamp_mismatch", f"{e}; the rarity head in "
+               f"{paths.snapshots_dir(network)} was fitted for another stack and the loop "
+               "refuses to score with it (§1)")
+        raise LoopStopped(f"rarity head stamp mismatch: {e}") from e
     tabu = records.recent_looks(network, stamp, cfg.tabu_days, today)
     rng = np.random.default_rng(records.date_seed(today, cfg.version))
     stats = _Stats(brain)
@@ -601,8 +618,9 @@ async def _day(cfg: Any, brain: Any, client: LfgClient, ledger: Any, *, dry_run:
 
 async def _post(cfg: Any, record: Record, client: LfgClient, nft_row: dict, stamp: Stamp,
                 today: date, fetch_image: Fetcher, critic_dir: Path | None) -> None:
-    """§4.1 step 8 / §4.5: name the look, draw the card, compose and publish. A failure here
-    is recorded in `record.post` and never undoes a done day."""
+    """§4.1 step 8 / §4.5: name the look, draw the card, compose and publish, to X when the
+    credentials and the month's budget allow (`x_post.poster_for`), else to the outbox with
+    the reason. A failure here is recorded in `record.post` and never undoes a done day."""
     try:
         critic = load_critic_records(critic_dir or paths.repo_root() / "data" / "critic")
         name = nearest_name(tuple(record.after), critic) if critic else None
@@ -619,7 +637,9 @@ async def _post(cfg: Any, record: Record, client: LfgClient, nft_row: dict, stam
         after_img = await fetch_image(after_url)
         card = before_after(before_img, after_img, day, with_from(record.changes, record.before))
         text = compose(record, name, day)
-        record.post = publish(cfg, text, card, record, name=name, day=day)
+        poster, why = x_post.poster_for(cfg)
+        record.post = publish(cfg, text, card, record, name=name, day=day, poster=poster,
+                              reason=why)
     except Exception as e:  # noqa: BLE001 — the post is the day's last, least step
         log.exception("post failed")
         record.post = {"channel": "none", "error": f"{type(e).__name__}: {e}"}

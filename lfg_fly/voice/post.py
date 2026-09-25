@@ -10,17 +10,20 @@ disclosed as "Tried N of M outfits" (§4.1 step 4). Below the naming threshold
 the look posts as untitled (§3.2). The text is kept within X's 280 weighted
 characters, dropping flourishes before it truncates.
 
-`publish` puts the post out. Without X credentials (or without an X poster wired
-in) it goes to `FLY_DATA_DIR/<network>/outbox/` through `lfg_fly.body.outbox.write`
-as `<stamp>-post.json`, with the card as a PNG of the same stem beside it. The
-outbox module is imported lazily, and the writer is injectable, so this module
-has no import-time dependency on the body. A session token or an X secret never
-appears in a payload or a result.
+`publish` puts the post out. With a `poster` (`lfg_fly.voice.x_post.poster_for`
+builds one from the `FLY_X_*` credentials, within `FLY_X_MONTHLY_BUDGET`) it goes
+to X. Without one, or when X refuses, it goes to `FLY_DATA_DIR/<network>/outbox/`
+through `lfg_fly.body.outbox.write` as `<stamp>-post.json`, with the card as a PNG
+of the same stem beside it and the reason in the payload. The outbox module is
+imported lazily, and the writer is injectable, so this module has no import-time
+dependency on the body. A session token or an X secret never appears in a payload
+or a result.
 """
 
 from __future__ import annotations
 
 import io
+import logging
 import os
 from collections.abc import Callable, Mapping
 from datetime import date
@@ -31,6 +34,8 @@ from PIL import Image
 
 from lfg_fly.brain.senses import SLOTS
 from lfg_fly.voice.card import change_lines, with_from
+
+log = logging.getLogger(__name__)
 
 FLY = "\U0001fab0"  # 🪰
 X_MAX_CHARS = 280
@@ -134,19 +139,26 @@ def _png(card: Image.Image) -> bytes:
 def publish(cfg: Any, text: str, card: Image.Image, record: Any, *,
             writer: Writer | None = None, poster: Poster | None = None,
             name: str | None = None, day: int | None = None,
-            env: Mapping[str, str] | None = None) -> dict:
+            env: Mapping[str, str] | None = None, reason: str | None = None) -> dict:
     """Put the post out (§4.5). With a `poster` it goes to X and the result is
-    {"channel": "x", "text", "result"}. Otherwise, and always without X credentials,
-    it goes to the outbox: `writer(network, "post", payload)` (default
+    {"channel": "x", "text", "result"}; a poster that raises loses nothing, the post
+    goes to the outbox with reason "x_failed: ...". Otherwise, and always without X
+    credentials, it goes to the outbox: `writer(network, "post", payload)` (default
     `lfg_fly.body.outbox.write`) with the card saved as a PNG of the same stem beside
     the JSON; the result is {"channel": "outbox", "reason", "path", "card", "text"}
-    and is what the loop stores as `record.post`. The payload carries the text, the
-    date, the hero, the before/after looks, the changes, the name and the day, and
-    never a credential."""
+    and is what the loop stores as `record.post`. `reason` names why there is no
+    poster (the loop passes `x_post.poster_for`'s, e.g. the budget); by default it is
+    "no_credentials" or "no_poster". The payload carries the text, the date, the hero,
+    the before/after looks, the changes, the name and the day, and never a credential."""
     png = _png(card)
     if poster is not None:
-        return {"channel": "x", "text": text, "result": poster(text, png)}
-    reason = "no_credentials" if x_credentials(env) is None else "no_poster"
+        try:
+            return {"channel": "x", "text": text, "result": poster(text, png)}
+        except Exception as e:  # noqa: BLE001 — X's refusal never loses the post
+            reason = f"x_failed: {type(e).__name__}: {e}"[:300]
+            log.warning("the post did not reach X (%s); it goes to the outbox", reason)
+    if reason is None:
+        reason = "no_credentials" if x_credentials(env) is None else "no_poster"
     write = writer if writer is not None else _default_writer()
     payload = {
         "text": text,

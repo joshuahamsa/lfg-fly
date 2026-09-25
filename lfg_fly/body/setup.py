@@ -12,7 +12,11 @@ The steps, in the order the rehearsal runs them:
 - `trustline`, `closet`, `mint`, `harvest`: LFG's public API as an agent user (docs/lfg-api.md),
   every signature through `Signer.sign_and_submit` under the matching §4.3 row
   (`trustset`, `accept_offer`, `mint_payment`), the spend cap (`FLY_SETUP_MAX_XRP`, §4.4)
-  stopping the mint loop.
+  stopping the mint loop. A mint payment is charged to the spend ledger under its sign
+  request id, so a run that dies after paying never pays that session again (§4.2).
+- `accept` (mainnet go-live step 3(b), §5): an operator's destination-locked, zero-price
+  sell offers, read on-ledger and accepted with the fly's own key, no LFG session; the
+  owner must be in `FLY_DONOR_SOURCES` (§4.3).
 - `status`: wallet, balance, RegularKey, characters, Closet, spend.
 
 `wallet.json` (`FLY_DATA_DIR/testnet/wallet.json`, chmod 600) is the state file of §5.3;
@@ -32,7 +36,7 @@ import secrets
 import stat
 import time
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -53,6 +57,7 @@ from lfg_fly.body.signer import (
     PreflightError,
     Purpose,
     Signer,
+    issuer_of,
     tx_hash,
     xrp_to_drops,
 )
@@ -408,6 +413,64 @@ def brix_pair(cfg: FlyConfig, env: Mapping[str, str] | None = None) -> tuple[str
     return currency, issuer
 
 
+# ---------------------------------------------------------------- accept (§5 step 3(b))
+
+
+async def _owned_ids(ledger: Any, account: str) -> set[str]:
+    return {str(e.get("NFTokenID", "")).upper() for e in await ledger.account_nfts(account)}
+
+
+async def accept(cfg: FlyConfig, ledger: Any, signer: Any, nft_ids: list[str]) -> dict:
+    """`fly setup accept`: take an operator's donors straight off the ledger (spec §5 mainnet
+    step 3(b); §4.3 NFTokenAcceptOffer row, owner in FLY_DONOR_SOURCES).
+
+    For each NFTokenID the sell offers are read on-ledger (`ledger.sell_offers`); the one
+    locked to the fly (`destination`), free (`amount == "0"`) and owned by a wallet in
+    `cfg.donor_sources` is accepted under `accept_offer`, through `Signer.sign_and_submit`
+    (which reads the offer again and applies the policy). Any other offer is reported in
+    `skipped`, never signed. An NFT the fly already owns is skipped, so a re-run is safe.
+    No LFG session is involved: LFG's pending-offer tray lists only its own offers
+    (docs/lfg-api.md §9). Returns {"accepted": [...], "skipped": [...]}.
+    """
+    if not cfg.donor_sources:
+        raise SetupError("FLY_DONOR_SOURCES is empty: `fly setup accept` takes offers only from "
+                         "the wallets it lists (spec §4.3, §5 step 3(b))")
+    if not nft_ids:
+        raise SetupError("accept takes one or more NFTokenIDs")
+    donors = set(cfg.donor_sources)
+    owned = await _owned_ids(ledger, signer.account)
+    accepted: list[dict] = []
+    skipped: list[dict] = []
+    for raw in nft_ids:
+        nft_id = str(raw).strip().upper()
+        try:
+            issuer_of(nft_id)
+        except ValueError:
+            skipped.append({"nft_id": raw, "why": "not a 64-hex NFTokenID"})
+            continue
+        if nft_id in owned:
+            skipped.append({"nft_id": nft_id, "why": "already owned by the fly"})
+            continue
+        offers = [o for o in await ledger.sell_offers(nft_id) if isinstance(o, dict)]
+        match = next((o for o in offers if o.get("destination") == signer.account
+                      and o.get("amount") == "0" and o.get("owner") in donors), None)
+        if match is None:
+            seen = [{"owner": o.get("owner"), "amount": o.get("amount"),
+                     "destination": o.get("destination")} for o in offers]
+            why = ("no zero-price sell offer to the fly from a FLY_DONOR_SOURCES wallet"
+                   + (f"; on-ledger sell offers: {seen}" if seen else "; no sell offers on-ledger"))
+            skipped.append({"nft_id": nft_id, "why": why})
+            continue
+        index = str(match.get("nft_offer_index"))
+        tx = {"TransactionType": "NFTokenAcceptOffer", "Account": signer.account,
+              "NFTokenSellOffer": index}
+        signed = await signer.sign_and_submit(tx, Purpose.accept_offer(nft_id))
+        log.info("accepted %s from %s (%s)", nft_id, match.get("owner"), signed["hash"])
+        accepted.append({"nft_id": nft_id, "offer": index, "owner": match.get("owner"),
+                         "hash": signed["hash"]})
+    return {"accepted": accepted, "skipped": skipped}
+
+
 def pick_hero(characters: list[dict]) -> str | None:
     """The loop's default hero (spec §4.1 step 5): the first mutable, non-blank male."""
     for c in characters:
@@ -430,9 +493,8 @@ def _look(attributes: Any) -> list[str]:
 class Setup:
     """One signed-in setup session: `trustline`, `closet`, `mint`, `harvest`, `status`.
 
-    `signer_factory(cfg) -> Signer` builds the RegularKey signer; it is called again when a
-    testnet run pins LFG's signing account from the first mint session (`cfg` is replaced).
-    `sleep` and `poll_every` are injectable so tests run without waiting.
+    `signer_factory(cfg) -> Signer` builds the RegularKey signer. `sleep` and `poll_every`
+    are injectable so tests run without waiting.
     """
 
     cfg: FlyConfig
@@ -446,7 +508,6 @@ class Setup:
     brix_currency: str | None = None
     brix_issuer: str | None = None
     signer: Any = field(init=False)
-    pinned_signing_account: str | None = field(init=False, default=None)
 
     def __post_init__(self) -> None:
         self.signer = self.signer_factory(self.cfg)
@@ -455,7 +516,8 @@ class Setup:
 
     def _delivery_owners(self) -> frozenset[str]:
         """Besides the NFTokenID's issuer, LFG's signing account may own a delivery offer
-        (an authorized minter); it is pinned config, never something LFG told us today."""
+        (an authorized minter); it is pinned config (FLY_LFG_SIGNING_ACCOUNT), never
+        something LFG told us today."""
         return frozenset({self.cfg.signing_account}) if self.cfg.signing_account else frozenset()
 
     async def _poll(self, getter: Callable[[str], Awaitable[dict]], sid: str,
@@ -578,9 +640,10 @@ class Setup:
         """
         if count < 1:
             raise ValueError("count must be >= 1")
-        if self.cfg.signing_account is None and self.cfg.network != "testnet":
-            raise SetupError("FLY_LFG_SIGNING_ACCOUNT is not set: LFG's mint destination must be "
-                             "pinned on mainnet (spec §4.3)")
+        if not self.cfg.signing_account:
+            raise SetupError("FLY_LFG_SIGNING_ACCOUNT is not set: LFG's mint destination is "
+                             "pinned per network in the fly's config, never learned from LFG "
+                             "(spec §4.3); on testnet it is staging's SEED address")
         minted: list[dict] = []
         obtained = 0
         stopped, reason = "count", None
@@ -614,48 +677,46 @@ class Setup:
             "reason": reason, "minted": [{k: v for k, v in m.items() if k != "unit_price"}
                                          for m in minted],
             "spent_xrp": _xrp(self.signer.spend.spent_drops),
-            "pinned_signing_account": self.pinned_signing_account,
         }
 
-    def _mint_destination(self, tx: dict) -> str:
-        """The pinned destination; on testnet only, an unpinned config learns it from the first
-        payment's txjson and pins it for the rest of the run (a disclosed deviation)."""
-        if self.cfg.signing_account:
-            return self.cfg.signing_account
-        if self.cfg.network != "testnet":
+    def _mint_destination(self) -> str:
+        """The pinned destination (spec §4.3: "pinned per network in the fly's config"). It is
+        never read from LFG's txjson: the signer compares the txjson against this pin."""
+        if not self.cfg.signing_account:
             raise SetupError("FLY_LFG_SIGNING_ACCOUNT is not set: mint refused (spec §4.3)")
-        dest = tx.get("Destination")
-        if not isinstance(dest, str) or not addresscodec.is_valid_classic_address(dest):
-            raise SetupError(f"mint txjson has no valid Destination: {dest!r}")
-        log.warning("testnet: pinning LFG's signing account to %s from the mint session; set "
-                    "FLY_LFG_SIGNING_ACCOUNT to pin it yourself", dest)
-        self.cfg = replace(self.cfg, signing_account=dest)
-        self.signer = self.signer_factory(self.cfg)
-        self.pinned_signing_account = dest
-        return dest
+        return self.cfg.signing_account
 
     @staticmethod
-    def _mint_purpose(total: Decimal, quantity: int, dest: str, pay_with: str) -> Purpose:
+    def _mint_purpose(total: Decimal, quantity: int, dest: str, pay_with: str,
+                      ref: str) -> Purpose:
         """pay_amount x quantity (spec §4.3): the per-unit price when the total divides evenly,
-        else the total once."""
+        else the total once. `ref` ties the charge to the sign request."""
         per = total / quantity
         if per * quantity == total:
             with contextlib.suppress(ValueError):
                 xrp_to_drops(per)
-                return Purpose.mint_payment(per, quantity, dest, pay_with=pay_with)
-        return Purpose.mint_payment(total, 1, dest, pay_with=pay_with)
+                return Purpose.mint_payment(per, quantity, dest, pay_with=pay_with, ref=ref)
+        return Purpose.mint_payment(total, 1, dest, pay_with=pay_with, ref=ref)
 
-    async def _pay(self, session: dict, quantity: int, what: str) -> Decimal | None:
+    async def _pay(self, session: dict, quantity: int, what: str,
+                   status_of: Callable[[str], Awaitable[dict]]) -> Decimal | None:
         """Sign the mint or bulk payment under `mint_payment`; returns the per-unit XRP price,
-        or None when the session is sponsored (no payment link)."""
+        or None when the session is sponsored (no payment link).
+
+        A payment already charged to the spend ledger under this sign request (a run that
+        died between the Payment validating and LFG hearing of it) is never paid again
+        (spec §4.2): this waits, polling `status_of(session id)`, for LFG to detect it on-ledger
+        (docs/lfg-api.md §7: within 300 s), and fails with a clear message if it does not.
+        """
         link = session.get("payment_link")
         if not link:
             return None
         pay_sid = LfgClient.sign_id(link)
+        sid = str(session.get("id"))
         pay_with = session.get("pay_with")
         if pay_with != "XRP":
             await self._reject(pay_sid, f"the fly pays XRP only, LFG quoted {pay_with}")
-            raise SetupError(f"{what} {session.get('id')} wants {pay_with!r}: the fly pays XRP "
+            raise SetupError(f"{what} {sid} wants {pay_with!r}: the fly pays XRP "
                              "only (spec §4.3); is an LFGO line funded on this wallet?")
         try:
             total = Decimal(str(session.get("pay_amount")))
@@ -663,15 +724,33 @@ class Setup:
         except (InvalidOperation, ValueError) as e:
             await self._reject(pay_sid, "unreadable price")
             raise SetupError(f"{what} price {session.get('pay_amount')!r} is not XRP: {e}") from e
+        if self.signer.spend.charged(pay_sid):
+            log.warning("%s %s: the payment for sign request %s was already charged; waiting "
+                        "for LFG to detect it on-ledger instead of paying again (spec §4.2)",
+                        what, sid, pay_sid)
+            try:
+                s = await self._poll(status_of, sid,
+                                     lambda st: st.get("state") != "awaiting_payment",
+                                     self.payment_timeout, what)
+            except SetupError as e:
+                raise SetupError(
+                    f"{what} {sid} is still awaiting a payment that was already charged "
+                    f"(sign request {pay_sid}); LFG did not detect it within "
+                    f"{self.payment_timeout:g}s. Check the ledger, cancel the session and "
+                    "re-run; the charge stays on the spend ledger") from e
+            if s.get("state") in MINT_DEAD:
+                raise SetupError(f"{what} {sid} ended {s.get('state')!r} after its payment was "
+                                 f"charged (sign request {pay_sid}): "
+                                 f"{s.get('error') or s.get('reason')}; cancel it and re-run")
+            return total / quantity
         try:
             self.signer.spend.check(drops)
         except PolicyError as e:
             await self._reject(pay_sid, "over FLY_SETUP_MAX_XRP")
             raise SpendCapReached(str(e)) from e
+        dest = self._mint_destination()
         await self._sign_request(
-            pay_sid,
-            lambda tx: self._mint_purpose(total, quantity, self._mint_destination(tx), pay_with),
-        )
+            pay_sid, lambda tx: self._mint_purpose(total, quantity, dest, pay_with, pay_sid))
         return total / quantity
 
     async def _mint_one(self) -> list[dict]:
@@ -686,7 +765,7 @@ class Setup:
         sid = s["id"]
         unit_price = None
         if s.get("state") == "awaiting_payment":
-            unit_price = await self._pay(s, 1, "mint")
+            unit_price = await self._pay(s, 1, "mint", self.client.mint_status)
         s = await self._poll(self.client.mint_status, sid,
                              lambda st: st.get("state") in MINT_PAID, self.payment_timeout,
                              "mint")
@@ -717,7 +796,8 @@ class Setup:
         jid = job["id"]
         unit_price = None
         if job.get("state") == "awaiting_payment":
-            unit_price = await self._pay(job, int(job.get("quantity") or quantity), "bulk mint")
+            unit_price = await self._pay(job, int(job.get("quantity") or quantity), "bulk mint",
+                                         self.client.bulk_status)
 
         def settled(j: dict) -> bool:
             units = j.get("units") or []
