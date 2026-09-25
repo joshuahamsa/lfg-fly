@@ -8,3 +8,10 @@ id = "xrpl-family-seed"
 description = "XRPL family seed (secp256k1 's…' 29 chars, ed25519 'sEd…' 31 chars)"
 regex = '''\bs(?:Ed)?[1-9A-HJ-NP-Za-km-z]{28}\b'''
 keywords = ["s"]
+
+# tests/test_x_post.py signs X's published OAuth 1.0a test vector (developer.x.com,
+# "Creating a signature": the consumer key, tokens, nonce and expected signature) to prove
+# the signer byte for byte. Those values are public documentation, not credentials; the
+# fly's real FLY_X_* credentials live only in ~/lfg-fly/.env.
+[allowlist]
+paths = ['''^tests/test_x_post\.py$''']
