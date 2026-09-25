@@ -63,7 +63,7 @@ def _cmd_catalog(args: argparse.Namespace) -> int:
 
     cache = paths.network_dir("mainnet") / "catalog"
     cat = build_catalog(args.api.rstrip("/"), cache, body=args.body)
-    (cache / f"catalog-{args.body}.json").write_text(cat.to_json())
+    (cache / f"catalog-{args.body}.json").write_text(cat.to_json(), encoding="utf-8")
     load_zorder(cache)
     print({slot: len(v) for slot, v in cat.values.items()})
     return 0
@@ -84,7 +84,7 @@ def _load_context(args: argparse.Namespace):
     pops = populations(g)
     retina = build_retina(load_columns(paths.graph_dir() / f"columns-syn{args.min_syn}.npz"), g)
     cache = paths.network_dir("mainnet") / "catalog"
-    cat = Catalog.from_json((cache / "catalog-male.json").read_text())
+    cat = Catalog.from_json((cache / "catalog-male.json").read_text(encoding="utf-8"))
     bank = LayerBank(cat, cache, size=64, device=args.device)
     seed = 0
     # the confirmation set: a fresh instance of the task (pairs, families and, since
@@ -133,7 +133,7 @@ def _cmd_grid(args: argparse.Namespace) -> int:
     else:
         b = G.current_records(out / "stage_b.jsonl", context)
     c_path = out / "stage_c.json"
-    c = json.loads(c_path.read_text()) if c_path.exists() else {}
+    c = json.loads(c_path.read_text(encoding="utf-8")) if c_path.exists() else {}
     best = G.best_eligible(b)
     # Stage C confirms the best on the independent confirmation set. A stage_c.json for
     # another setting, context or confirmation seed (or one from before the confirmation
@@ -155,7 +155,8 @@ def _cmd_grid(args: argparse.Namespace) -> int:
     v["graph_hash"] = ctx.graph.graph_hash()
     v["catalog_values"] = {slot: len(vals) for slot, vals in ctx.catalog.values.items()}
     out.mkdir(parents=True, exist_ok=True)  # `--stage b|c` on a fresh checkout wrote nothing yet
-    (out / "verdict.json").write_text(json.dumps(v, indent=1, sort_keys=True) + "\n")
+    (out / "verdict.json").write_text(json.dumps(v, indent=1, sort_keys=True) + "\n",
+                                      encoding="utf-8")
     print(G.verdict_line(v, args.cap))
     return 0
 
@@ -186,7 +187,7 @@ def _cmd_interact(args: argparse.Namespace) -> int:
         cal = I.calibrate(ctx, sets, cal_path)
         print("\n".join(IR.calibration_lines(cal)))
     else:
-        cal = json.loads(cal_path.read_text()) if cal_path.exists() else {}
+        cal = json.loads(cal_path.read_text(encoding="utf-8")) if cal_path.exists() else {}
     if args.stage in ("b", "all"):
         why = I.calibration_blocks(cal, context)
         if why:
@@ -235,14 +236,14 @@ def _cmd_critic(args: argparse.Namespace) -> int:
     cache = paths.network_dir("mainnet") / "catalog"
     out = paths.network_dir("mainnet") / "renders" / f"critic-{args.round}"
     if args.stage == "render":
-        cat = Catalog.from_json((cache / "catalog-male.json").read_text())
+        cat = Catalog.from_json((cache / "catalog-male.json").read_text(encoding="utf-8"))
         m = C.write_round(cat, cache, load_zorder(cache), out, args.round, n_pairs=args.pairs,
                           seed=C.ROUND1_SEED if args.seed is None else args.seed,
                           batch=C.BATCH if args.batch is None else args.batch)
         print(f"{m['n_pairs']} pairs, {len(m['items'])} items, {len(m['batches'])} batches "
               f"-> {out}")
         return 0
-    m = json.loads((out / "manifest.json").read_text())
+    m = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
     verdicts, bad = C.read_results(m, out / "results")
     if bad:
         print(f"{len(bad)} batch(es) missing or incomplete: {' '.join(sorted(bad))}")
@@ -254,7 +255,7 @@ def _cmd_critic(args: argparse.Namespace) -> int:
         return 0
     summary = C.write_round_data(recs, paths.repo_root() / "data" / "critic", args.round)
     (paths.repo_root() / "data" / "critic" / f"{args.round}-manifest.json").write_text(
-        json.dumps({k: v for k, v in m.items() if k != "batches"}, indent=1))
+        json.dumps({k: v for k, v in m.items() if k != "batches"}, indent=1), encoding="utf-8")
     print(json.dumps(summary, indent=1, sort_keys=True))
     return 0 if not bad else 2
 

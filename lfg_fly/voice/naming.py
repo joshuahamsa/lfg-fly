@@ -107,7 +107,7 @@ def load_critic_records(directory: Path) -> list[dict]:
         return []
     out: list[dict] = []
     for path in sorted(directory.glob("*.jsonl")):
-        for line in path.read_text().splitlines():
+        for line in path.read_text(encoding="utf-8").splitlines():
             if line.strip():
                 out.append(json.loads(line))
     return out

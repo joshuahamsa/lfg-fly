@@ -203,7 +203,7 @@ def save_head(path: Path, head: TasteHead | RarityHead) -> None:
     np.savez(tmp, **arrays)
     os.replace(tmp, npz)
     tmp_js = js.with_name(js.name + ".tmp")
-    tmp_js.write_text(json.dumps(meta, indent=1, sort_keys=True) + "\n")
+    tmp_js.write_text(json.dumps(meta, indent=1, sort_keys=True) + "\n", encoding="utf-8")
     os.replace(tmp_js, js)
 
 
@@ -211,7 +211,7 @@ def load_head(path: Path) -> TasteHead | RarityHead:
     npz, js = _head_files(path)
     if not npz.exists() or not js.exists():
         raise FileNotFoundError(f"no head at {path} (need {npz.name} and {js.name})")
-    meta = json.loads(js.read_text())
+    meta = json.loads(js.read_text(encoding="utf-8"))
     with np.load(npz, allow_pickle=False) as z:
         arrays = {k: np.asarray(z[k], dtype=np.float64) for k in ("mu", "sd", "w") if k in z}
     if set(arrays) != {"mu", "sd", "w"}:

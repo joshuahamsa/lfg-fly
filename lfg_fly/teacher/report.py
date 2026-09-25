@@ -119,7 +119,7 @@ def _decodability_by_code(b: list[dict]) -> list[str]:
 
 
 def write_report(results_dir: Path, out_md: Path) -> None:
-    v = json.loads((results_dir / "verdict.json").read_text())
+    v = json.loads((results_dir / "verdict.json").read_text(encoding="utf-8"))
     # only the verdict's own context: stale records from another graph or probe set never count
     a = current_records(results_dir / "stage_a.jsonl", v.get("context"))
     b = current_records(results_dir / "stage_b.jsonl", v.get("context"))
@@ -185,7 +185,7 @@ def write_report(results_dir: Path, out_md: Path) -> None:
                      f"{pb['heldout']:.3f} | {pb['ci_lo']:.3f}–{pb['ci_hi']:.3f} |")
     lines += _decodability_by_code(b)
     c_path = results_dir / "stage_c.json"
-    c = json.loads(c_path.read_text()) if c_path.exists() else {}
+    c = json.loads(c_path.read_text(encoding="utf-8")) if c_path.exists() else {}
     if stage_c_matches(c, best, seed):  # never another setting's (or context's) Stage C
         lines += ["", "## Stage C: per-slot decodability of the best setting", "",
                   "On the selection probe set's held-out looks, like Stage B's. The confirmation "
@@ -200,4 +200,4 @@ def write_report(results_dir: Path, out_md: Path) -> None:
     lines += _how_to_read(seed, confirm_seed)
     lines += ["", "---", "", ATTRIBUTION, ""]
     out_md.parent.mkdir(parents=True, exist_ok=True)
-    out_md.write_text("\n".join(lines))
+    out_md.write_text("\n".join(lines), encoding="utf-8")

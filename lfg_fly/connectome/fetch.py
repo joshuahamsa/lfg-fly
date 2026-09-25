@@ -83,5 +83,6 @@ def fetch(
         if expected_bytes is not None and key in expected_bytes and size != expected_bytes[key]:
             raise ValueError(f"{fname}: {size} bytes, expected {expected_bytes[key]}")
         manifest[key] = {"file": fname, "bytes": size, "sha256": sha256_file(dest)}
-    (raw / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    (raw / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+                                       encoding="utf-8")
     return manifest

@@ -131,7 +131,7 @@ def read_jsonl(path: Path) -> list[dict]:
     skipped with a warning. Any other unparsable line raises."""
     if not path.exists():
         return []
-    lines = [line for line in path.read_text().splitlines() if line.strip()]
+    lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
     out = []
     for i, line in enumerate(lines):
         try:
@@ -414,7 +414,7 @@ def stage_c(ctx: Context, best: dict, out_path: Path) -> dict:
                                              device=ctx.device, seed=ctx.seed).as_dict()
     out["bayes_confirmation"] = bayes_ceiling(cs.p[cs.test])
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(out, indent=1, sort_keys=True) + "\n")
+    out_path.write_text(json.dumps(out, indent=1, sort_keys=True) + "\n", encoding="utf-8")
     return out
 
 

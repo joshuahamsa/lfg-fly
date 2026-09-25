@@ -272,7 +272,7 @@ class SpendLedger:
     def _load(self) -> dict:
         if not self.path.exists():
             return {"network": self.network, "spent_drops": 0, "charges": []}
-        data = json.loads(self.path.read_text())
+        data = json.loads(self.path.read_text(encoding="utf-8"))
         if data.get("network") != self.network:
             raise PolicyError(
                 f"{self.path} belongs to network {data.get('network')!r}, not {self.network!r}"
@@ -310,7 +310,7 @@ class SpendLedger:
         )
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(data, indent=2) + "\n")
+        tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
         os.replace(tmp, self.path)
 
 
