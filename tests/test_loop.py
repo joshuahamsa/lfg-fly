@@ -839,3 +839,25 @@ def test_cli_move_reports_a_refusal_as_exit_2(monkeypatch, capsys, tmp_path):
     assert parser.parse_args(["move", "--device", "cpu"]).func(
         parser.parse_args(["move", "--device", "cpu"])) == 2
     assert "FLY_ENABLED" in capsys.readouterr().out
+
+
+def test_cli_move_reports_an_lfg_refusal_as_one_line(monkeypatch, capsys):
+    """A 503 agent_disabled from LFG is a one-line message and exit 2, not a traceback."""
+    import argparse
+
+    from lfg_fly.body import cli_move
+    from lfg_fly.body.client import LfgError
+
+    async def refused(*_a, **_k):
+        raise LfgError(503, "agent_disabled", {"code": "agent_disabled"})
+
+    monkeypatch.setattr(cli_move.loop, "move", refused)
+    monkeypatch.setattr(cli_move, "_load_brain", lambda cfg, device: object())
+    monkeypatch.setattr(cli_move, "load_dotenv", lambda path: 0)
+    monkeypatch.setenv("FLY_NETWORK", "testnet")
+    parser = argparse.ArgumentParser()
+    cli_move.register(parser.add_subparsers(dest="command"))
+    args = parser.parse_args(["move", "--dry-run"])
+    assert args.func(args) == 2
+    out = capsys.readouterr().out
+    assert "503 agent_disabled" in out and "AGENT_SIGNIN_ENABLED" in out

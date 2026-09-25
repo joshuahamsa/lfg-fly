@@ -80,11 +80,22 @@ def _cmd_move(args: argparse.Namespace) -> int:
     cfg = load_config()
     today = date.fromisoformat(args.date) if args.date else None
     brain = _load_brain(cfg, args.device)
+    from lfg_fly.body.chain import ChainError
+    from lfg_fly.body.client import LfgError
+
     try:
         record = asyncio.run(loop.move(cfg, brain, dry_run=args.dry_run, today=today,
                                        hero=args.hero))
     except (loop.LoopRefused, loop.LoopStopped) as e:
         print(f"move refused: {e}")
+        return 2
+    except LfgError as e:
+        hint = (" (LFG's AGENT_SIGNIN_ENABLED is off on this stack)"
+                if e.code == "agent_disabled" else "")
+        print(f"move failed: LFG answered {e.status} {e.code or e.body}{hint}")
+        return 2
+    except ChainError as e:
+        print(f"move failed: {type(e).__name__}: {e}")
         return 2
     print(_summary(record))
     return 0

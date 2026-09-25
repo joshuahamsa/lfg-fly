@@ -235,7 +235,8 @@ def _jsonable(x):
 def _write_json(path: Path, obj: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(_jsonable(obj), indent=1, sort_keys=True) + "\n")
+    tmp.write_text(json.dumps(_jsonable(obj), indent=1, sort_keys=True) + "\n",
+                   encoding="utf-8")
     tmp.replace(path)
 
 
@@ -643,13 +644,23 @@ def _qc_lines(qc: dict, round_name: str, fly: dict) -> list[str]:
     return out
 
 
+def _rel(path_like) -> str:
+    """A path as the report shows it: relative to the repo root when it lives inside it,
+    so REPORT.md reads the same from any checkout."""
+    try:
+        return str(Path(str(path_like)).resolve().relative_to(paths.repo_root().resolve()))
+    except (ValueError, OSError):
+        return str(path_like)
+
+
 def _identity(results: dict) -> list[str]:
     out = ["", "## Checkpoint identity (spec §2 Checkpoint and versioning)", ""]
     ck = results.get("checkpoint")
     if not ck:
         return out + ["The checkpoint is not written yet."]
     m = ck["manifest"]
-    out += [f"- Checkpoint: `{ck['dir']}` (version `{m['version']}`), created {m['created_at']}.",
+    out += [f"- Checkpoint: `{_rel(ck['dir'])}` (version `{m['version']}`), "
+            f"created {m['created_at']}.",
             f"- Graph hash `{m['graph_hash']}`; threshold ≥{m['min_syn']} synapses; "
             f"{m['nt_missing']:,} neurons without an NT prediction (treated as `unclear`).",
             "- Feathers (sha256): " + (", ".join(f"{k} `{v}`" for k, v in
@@ -714,7 +725,7 @@ def write_report(results: dict, qc: dict, out_md: Path) -> None:
              f"readout active {_f(fly.get('stats', {}).get('readout_active_frac'))}; "
              f"{fly.get('seconds', '—')} s of simulation.",
              "", "## Labels", "",
-             f"- Source `{labels.get('source', '—')}` (round {round_name}): "
+             f"- Source `{_rel(labels.get('source', '—'))}` (round {round_name}): "
              f"{labels['n_pairs'] + labels['n_dropped']:,} pairs judged, "
              f"{labels['n_dropped']:,} dropped as position-bias flips, {labels['n_pairs']:,} "
              f"kept over {labels.get('n_families', '—')} look families "
@@ -767,7 +778,7 @@ def write_report(results: dict, qc: dict, out_md: Path) -> None:
     out_md = Path(out_md)
     out_md.parent.mkdir(parents=True, exist_ok=True)
     tmp = out_md.with_name(out_md.name + ".tmp")
-    tmp.write_text("\n".join(lines))
+    tmp.write_text("\n".join(lines), encoding="utf-8")
     tmp.replace(out_md)
 
 

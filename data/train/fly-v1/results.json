@@ -1,0 +1,331 @@
+{
+ "beats": {
+  "eyes_only": false,
+  "mlp": false,
+  "no_brain": false,
+  "nose_only": true,
+  "rewired": false,
+  "sign_shuffled": false,
+  "syn5": false
+ },
+ "c_ref": 0.7,
+ "checkpoint": {
+  "dir": "/home/hamsa/lfg-fly/.claude/worktrees/fly-deployment-ce1519/checkpoints/fly-v1",
+  "feathers_known": true,
+  "manifest": {
+   "c_ref": 0.7,
+   "catalog_hash": "cbd9184be0c73a20cc18dc711220d2afd8bfafa7b0ef2dd89744911eef62c70f",
+   "codes": {
+    "allsens": "v1",
+    "odor": "v2"
+   },
+   "columns_hash": "7ce7d9fa4895d00301b09a01509bd785ea7f92bc790a3bef0c023578007624b1",
+   "created_at": "2026-09-25T16:26:50+00:00",
+   "feathers": {
+    "annotations": "2177e246113e4cfbf1e7772ec37c6da1955ff22e8063d0b1f833101f99a9a3b2",
+    "neurotransmitters": "95c9289220663abeb3409f3ad9e5a7f8a53f8093f5139d15502cd08da8879621",
+    "weights": "9b3beab17bad5f618be3f2c02d3139a8d07b822565919c013f1e5506d93e604b"
+   },
+   "graph_hash": "f2f62e0a0bbf145e285cfe6cd3b6ec9a02d328cd36639b675d491b2efc3bed1b",
+   "lfg_trait_config_commit": "0415a63afdcea11156b57169d34e38bb8d377adc",
+   "min_syn": 3,
+   "nt_missing": 502,
+   "setting": {
+    "brain": {
+     "alpha": 0.7,
+     "bias": 0.1,
+     "burn_in": 200,
+     "g_syn": 1.0,
+     "kind": "rate",
+     "noise": 0.0,
+     "refractory": 2,
+     "seed": 0,
+     "steps": 60,
+     "tau_ms": 20.0,
+     "trials": 1
+    },
+    "code": "all-sensory-brain",
+    "g_in": 2.0
+   },
+   "sign_map": {
+    "acetylcholine": 1,
+    "dopamine": 1,
+    "gaba": -1,
+    "glutamate": -1,
+    "histamine": -1,
+    "octopamine": 1,
+    "serotonin": 1,
+    "unclear": 1
+   },
+   "taste": {
+    "ci_hi": 0.689119170984456,
+    "ci_lo": 0.6068285065303805,
+    "gate_pass": true,
+    "head_heldout": 0.648972602739726,
+    "heldout": 0.648972602739726,
+    "labels": "/home/hamsa/lfg-fly/.claude/worktrees/fly-deployment-ce1519/data/critic/r1.jsonl",
+    "lam": 0.1,
+    "n_test": 584,
+    "n_train": 2338,
+    "round": "r1",
+    "taste_sd": 2.261612890856268
+   },
+   "version": "fly-v1"
+  }
+ },
+ "controls": {
+  "eyes_only": {
+   "ci_hi": 0.6518882942790175,
+   "ci_lo": 0.5645383543485385,
+   "cv_acc": 0.6117242693901062,
+   "heldout": 0.6078767123287672,
+   "lam": 0.1,
+   "n_test": 584,
+   "phase0_heldout": 0.5933333333333334,
+   "phase0_passed": true,
+   "seconds": 37.51,
+   "setting": {
+    "brain": {
+     "alpha": 0.7,
+     "bias": 0.1,
+     "burn_in": 200,
+     "g_syn": 2.0,
+     "kind": "rate",
+     "noise": 0.0,
+     "refractory": 2,
+     "seed": 0,
+     "steps": 60,
+     "tau_ms": 20.0,
+     "trials": 1
+    },
+    "code": "eyes",
+    "g_in": 0.5
+   },
+   "stats": {
+    "active_frac": 0.5298668742179871,
+    "max_step_frac": 0.015243275091052055,
+    "readout_active_frac": 0.7385327219963074
+   },
+   "train_acc": 0.6544054746627808
+  },
+  "mlp": {
+   "ci_hi": 0.6825147615267387,
+   "ci_lo": 0.6020583190394511,
+   "cv_acc": 0.6155658483505249,
+   "heldout": 0.6438356164383562,
+   "hidden": 256,
+   "lam": 1.0,
+   "n_features": 579,
+   "n_test": 584,
+   "pixels": true,
+   "seconds": 162.82,
+   "train_acc": 1.0
+  },
+  "no_brain": {
+   "ci_hi": 0.7055837563451777,
+   "ci_lo": 0.6282211733330201,
+   "cv_acc": 0.6108851313591004,
+   "heldout": 0.6678082191780822,
+   "lam": 100.0,
+   "n_features": 579,
+   "n_test": 584,
+   "pixels": true,
+   "seconds": 60.21,
+   "train_acc": 0.7647562026977539
+  },
+  "nose_only": {
+   "ci_hi": 0.579314765694076,
+   "ci_lo": 0.5,
+   "cv_acc": 0.5209642887115479,
+   "heldout": 0.5393835616438356,
+   "lam": 0.001,
+   "n_test": 584,
+   "phase0_heldout": 0.6483333333333333,
+   "phase0_passed": true,
+   "seconds": 33.87,
+   "setting": {
+    "brain": {
+     "alpha": 0.7,
+     "bias": 0.1,
+     "burn_in": 200,
+     "g_syn": 1.0,
+     "kind": "rate",
+     "noise": 0.0,
+     "refractory": 2,
+     "seed": 0,
+     "steps": 60,
+     "tau_ms": 20.0,
+     "trials": 1
+    },
+    "code": "nose",
+    "g_in": 2.0
+   },
+   "stats": {
+    "active_frac": 0.8304973244667053,
+    "max_step_frac": 0.0,
+    "readout_active_frac": 0.9840299487113953
+   },
+   "train_acc": 0.5906758308410645
+  },
+  "rewired": {
+   "ci_hi": 0.6808910497822761,
+   "ci_lo": 0.6020582930035427,
+   "cv_acc": 0.6099462509155273,
+   "graph_hash": "7130ed357852d25a3cf3c4018e86260a176cfa338eebcf56ddde29905b7a6660",
+   "heldout": 0.6421232876712328,
+   "lam": 100.0,
+   "n_test": 584,
+   "seconds": 35.44,
+   "stats": {
+    "active_frac": 0.9246021509170532,
+    "max_step_frac": 0.0,
+    "readout_active_frac": 0.9894782900810242
+   },
+   "train_acc": 0.7604790329933167
+  },
+  "sign_shuffled": {
+   "ci_hi": 0.6890063297900753,
+   "ci_lo": 0.6106274028508901,
+   "cv_acc": 0.6009878635406494,
+   "graph_hash": "30a3f13ac01658ffa2aa77985cd73f8faf04cfa77eb959bc5869be76ad861b6b",
+   "heldout": 0.6506849315068494,
+   "lam": 1.0,
+   "n_test": 584,
+   "seconds": 33.63,
+   "stats": {
+    "active_frac": 0.9300057291984558,
+    "max_step_frac": 5.450515527627431e-05,
+    "readout_active_frac": 0.9971043467521667
+   },
+   "train_acc": 0.7390932440757751
+  },
+  "syn5": {
+   "ci_hi": 0.6831366975099764,
+   "ci_lo": 0.6003430531732419,
+   "cv_acc": 0.6099695324897766,
+   "edges": 6235682,
+   "graph_hash": "3ce5d7f715b5af350d9074e1da1eb9d77da139773eb8808c3415c1f33ffcba41",
+   "heldout": 0.6438356164383562,
+   "lam": 0.1,
+   "min_syn": 5,
+   "n_test": 584,
+   "seconds": 24.61,
+   "stats": {
+    "active_frac": 0.8075202703475952,
+    "max_step_frac": 1.211225662700599e-05,
+    "readout_active_frac": 0.9697291851043701
+   },
+   "train_acc": 0.7583404779434204
+  }
+ },
+ "controls_run": true,
+ "created_at": "2026-09-25T08:20:30+00:00",
+ "device": "cuda",
+ "fly": {
+  "ci_hi": 0.689119170984456,
+  "ci_lo": 0.6068285065303805,
+  "cv_acc": 0.6184887647628784,
+  "heldout": 0.648972602739726,
+  "lam": 0.1,
+  "n_test": 584,
+  "seconds": 34.28,
+  "stats": {
+   "active_frac": 0.8243628740310669,
+   "max_step_frac": 1.211225662700599e-05,
+   "readout_active_frac": 0.9837735295295715
+  },
+  "train_acc": 0.7656116485595703
+ },
+ "gate": {
+  "ci_lo": 0.6068285065303805,
+  "ci_lo_min": 0.55,
+  "pass": true
+ },
+ "graph": {
+  "edges": 10511038,
+  "hash": "f2f62e0a0bbf145e285cfe6cd3b6ec9a02d328cd36639b675d491b2efc3bed1b",
+  "min_syn": 3,
+  "n": 165122,
+  "nt_missing": 502
+ },
+ "head": {
+  "agreement_with_protocol": 1.0,
+  "ci_hi": 0.689119170984456,
+  "ci_lo": 0.6068285065303805,
+  "heldout": 0.648972602739726,
+  "lam": 0.1,
+  "n_features": 2129,
+  "path": "/home/hamsa/lfg-fly/.claude/worktrees/fly-deployment-ce1519/data/train/fly-v1",
+  "taste_sd": 2.261612890856268
+ },
+ "labels": {
+  "n_dropped": 78,
+  "n_families": 1000,
+  "n_looks": 3920,
+  "n_pairs": 2922,
+  "n_test": 584,
+  "n_test_families": 200,
+  "n_train": 2338,
+  "near_frac": 0.5838466803559206,
+  "source": "/home/hamsa/lfg-fly/.claude/worktrees/fly-deployment-ce1519/data/critic/r1.jsonl"
+ },
+ "paired": {
+  "eyes_only": {
+   "diff": 0.041095890410958846,
+   "hi": 0.08592757250625724,
+   "lo": -0.005136986301369863
+  },
+  "mlp": {
+   "diff": 0.005136986301369828,
+   "hi": 0.03747870528109029,
+   "lo": -0.027733259258811947
+  },
+  "no_brain": {
+   "diff": -0.018835616438356184,
+   "hi": 0.008562010973002182,
+   "lo": -0.04655172413793104
+  },
+  "nose_only": {
+   "diff": 0.1095890410958904,
+   "hi": 0.16096580629244106,
+   "lo": 0.059931506849315065
+  },
+  "rewired": {
+   "diff": 0.006849315068493178,
+   "hi": 0.035960446086609164,
+   "lo": -0.021960388370604107
+  },
+  "sign_shuffled": {
+   "diff": -0.00171232876712335,
+   "hi": 0.02735042735042735,
+   "lo": -0.03103448275862069
+  },
+  "syn5": {
+   "diff": 0.005136986301369828,
+   "hi": 0.023890784982935155,
+   "lo": -0.011945392491467578
+  }
+ },
+ "rewire_repairs": 22153,
+ "round": "r1",
+ "seconds": 1281.45,
+ "seed": 0,
+ "setting": {
+  "brain": {
+   "alpha": 0.7,
+   "bias": 0.1,
+   "burn_in": 200,
+   "g_syn": 1.0,
+   "kind": "rate",
+   "noise": 0.0,
+   "refractory": 2,
+   "seed": 0,
+   "steps": 60,
+   "tau_ms": 20.0,
+   "trials": 1
+  },
+  "code": "all-sensory-brain",
+  "g_in": 2.0
+ },
+ "version": "fly-v1"
+}
