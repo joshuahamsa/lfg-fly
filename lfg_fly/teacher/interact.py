@@ -112,7 +112,7 @@ def _ceilings(t: Tasted, cat) -> dict[str, float]:
 
 def _write_json(path: Path, obj: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(obj, indent=1, sort_keys=True) + "\n")
+    path.write_text(json.dumps(obj, indent=1, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def calibrate(ctx: G.Context, sets: TasteSets, out_path: Path) -> dict:

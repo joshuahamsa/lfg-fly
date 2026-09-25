@@ -170,7 +170,7 @@ def write_round(cat: Catalog, cache: Path, zorder: ZOrder, out_dir: Path, round_
         (out_dir / "batches" / f"{name}.json").write_text(json.dumps({
             "batch": name, "round": round_name,
             "items": [{"item_id": x, "image": str(out_dir / by_id[x].image)} for x in ids],
-        }, indent=1))
+        }, indent=1), encoding="utf-8")
     manifest = {
         "round": round_name, "seed": seed, "n_pairs": len(pairs), "batch": batch,
         "catalog_body": cat.body, "card_size": list(CARD_SIZE),
@@ -179,7 +179,7 @@ def write_round(cat: Catalog, cache: Path, zorder: ZOrder, out_dir: Path, round_
         "items": [it.as_dict() for it in items],
         "batches": {name: ids for name, ids in zip(batch_ids, batches, strict=True)},
     }
-    (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=1))
+    (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=1), encoding="utf-8")
     return manifest
 
 
@@ -204,7 +204,7 @@ def read_results(manifest: dict, results_dir: Path) -> tuple[dict[str, dict], li
             bad.append(name)
             continue
         try:
-            rows = json.loads(path.read_text())
+            rows = json.loads(path.read_text(encoding="utf-8"))
             rows = rows["verdicts"] if isinstance(rows, dict) else rows
         except (ValueError, KeyError, TypeError):
             bad.append(name)
@@ -294,9 +294,10 @@ def write_round_data(records: list[dict], out_dir: Path, round_name: str) -> dic
             f.write(json.dumps(r, sort_keys=True) + "\n")
     summary = qc(records)
     (out_dir / f"{round_name}-qc.json").write_text(json.dumps(summary, indent=1, sort_keys=True)
-                                                   + "\n")
+                                                   + "\n", encoding="utf-8")
     return summary
 
 
 def read_round_data(path: Path) -> list[dict]:
-    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    lines = path.read_text(encoding="utf-8").splitlines()
+    return [json.loads(line) for line in lines if line.strip()]

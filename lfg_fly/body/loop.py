@@ -116,7 +116,7 @@ def read_wallet_file(path: Path, network: str | None = None) -> tuple[str, str]:
     `fly setup`). Tolerant of the key names `address|account|wallet|classic_address`
     and `regular_seed|regular_key_seed|regular.seed`; a file stamped for another network
     is refused. The seed is returned, never logged."""
-    data = json.loads(Path(path).read_text())
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise ValueError(f"{path}: not a wallet file")
     if network is not None and data.get("network") not in (None, network):

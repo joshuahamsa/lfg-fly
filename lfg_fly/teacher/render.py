@@ -49,7 +49,7 @@ def load_zorder(cache: Path, commit: str = LFG_TRAIT_CONFIG_COMMIT, get=http_get
             raise RuntimeError(f"trait_config.yaml@{commit}: HTTP {status}")
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
-    return zorder_from_config(yaml.safe_load(path.read_text()))
+    return zorder_from_config(yaml.safe_load(path.read_text(encoding="utf-8")))
 
 
 class LayerBank:

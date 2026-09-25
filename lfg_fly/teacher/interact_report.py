@@ -137,8 +137,8 @@ def _reproduction(rows: list[dict]) -> str:
 
 
 def write_report(results_dir: Path, out_md: Path) -> None:
-    c = json.loads((results_dir / "stage_c.json").read_text())
-    cal = json.loads((results_dir / "calibration.json").read_text())
+    c = json.loads((results_dir / "stage_c.json").read_text(encoding="utf-8"))
+    cal = json.loads((results_dir / "calibration.json").read_text(encoding="utf-8"))
     rows = [r for r in read_jsonl(results_dir / "stage_b.jsonl") if r["context"] == c["context"]]
     T = c["tastes"]
     lines = [
@@ -161,4 +161,4 @@ def write_report(results_dir: Path, out_md: Path) -> None:
         "## Attribution", "", ATTRIBUTION, "",
     ]
     out_md.parent.mkdir(parents=True, exist_ok=True)
-    out_md.write_text("\n".join(lines))
+    out_md.write_text("\n".join(lines), encoding="utf-8")

@@ -111,13 +111,14 @@ def write_checkpoint(directory: Path, manifest: Manifest, head: R.TasteHead) -> 
     directory.mkdir(parents=True, exist_ok=True)
     R.save_head(directory, head)
     tmp = directory / (MANIFEST + ".tmp")
-    tmp.write_text(json.dumps(manifest.to_dict(), indent=1, sort_keys=True) + "\n")
+    tmp.write_text(json.dumps(manifest.to_dict(), indent=1, sort_keys=True) + "\n",
+                   encoding="utf-8")
     tmp.replace(directory / MANIFEST)
 
 
 def read_checkpoint(directory: Path) -> tuple[Manifest, R.TasteHead]:
     directory = Path(directory)
-    manifest = Manifest.from_dict(json.loads((directory / MANIFEST).read_text()))
+    manifest = Manifest.from_dict(json.loads((directory / MANIFEST).read_text(encoding="utf-8")))
     head = R.load_head(directory)
     if not isinstance(head, R.TasteHead):
         raise ValueError(f"{directory}: the checkpoint's head is not a taste head")
@@ -174,7 +175,8 @@ class FlyBrain:
                                      "pinned one")
         pops = populations(g)
         retina = build_retina(cols, g, size=RETINA_SIZE)
-        cat = Catalog.from_json((catalog_dir / f"catalog-{CATALOG_BODY}.json").read_text())
+        cat = Catalog.from_json(
+            (catalog_dir / f"catalog-{CATALOG_BODY}.json").read_text(encoding="utf-8"))
         matches = manifest.catalog_hash is None or catalog_hash(cat) == manifest.catalog_hash
         if not matches:
             log.warning("%s: the catalog in %s is not the one the head was trained on "
