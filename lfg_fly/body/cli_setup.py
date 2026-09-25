@@ -78,6 +78,10 @@ def _config() -> FlyConfig:
 def _guarded(fn: Callable[[argparse.Namespace, FlyConfig], int],
              ) -> Callable[[argparse.Namespace], int]:
     def run(args: argparse.Namespace) -> int:
+        from lfg_fly.body.chain import ChainError
+        from lfg_fly.body.client import LfgError
+        from lfg_fly.body.signer import PolicyError
+
         try:
             return fn(args, _config())
         except SU.InsideRepoError as e:
@@ -85,6 +89,17 @@ def _guarded(fn: Callable[[argparse.Namespace, FlyConfig], int],
             return 2
         except SU.SetupError as e:
             print(f"setup failed: {e}", file=sys.stderr)
+            return 1
+        except LfgError as e:
+            hint = ""
+            if e.code == "agent_disabled":
+                hint = (" (LFG's AGENT_SIGNIN_ENABLED is off on this stack: the companion "
+                        "spec's rollout step 3)")
+            print(f"setup failed: LFG answered {e.status} {e.code or e.body}{hint}",
+                  file=sys.stderr)
+            return 1
+        except (ChainError, PolicyError) as e:
+            print(f"setup failed: {type(e).__name__}: {e}", file=sys.stderr)
             return 1
     return run
 
