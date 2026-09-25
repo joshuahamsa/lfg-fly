@@ -1,4 +1,5 @@
-"""`fly` command line. Subcommands are added by later tasks."""
+"""`fly` command line: the connectome (fetch, build, columns), the teacher (catalog, grid,
+interact, critic, train, report) and the body (setup, move, claim, retrain)."""
 
 from __future__ import annotations
 
@@ -315,6 +316,14 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("report", help="write docs/PHASE0.md (and PHASE0B.md) from data/")
     p.set_defaults(func=_cmd_report)
 
+    # the teacher's trainer and the body (spec §3.3, §4, §5.3); each module owns its parser
+    from lfg_fly.body import cli_daily, cli_move, cli_setup
+    from lfg_fly.teacher import cli_train
+
+    cli_train.register(sub)
+    cli_setup.register(sub)
+    cli_move.register(sub)
+    cli_daily.register(sub)
     return parser
 
 
