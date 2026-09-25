@@ -5,6 +5,11 @@ cross-validation grouped by look family, a held-out test split by family, and a
 family-resampling bootstrap CI. `evaluate_mlp` is the same protocol with a one-
 hidden-layer scorer (§3.4 control 3), and `paired_diff` compares two models on
 the same test pairs (§3.0b).
+
+`fit_bt`, `evaluate` and `evaluate_mlp` take an optional per-pair weight `w`
+(spec §2 Readout: the critic's strength as the sample weight). It weights the
+BCE term, normalized to mean 1 over the rows being fitted, so a flat weight
+changes nothing; `None` means flat.
 """
 
 from __future__ import annotations
@@ -48,13 +53,35 @@ def _folds(groups: np.ndarray, k: int) -> np.ndarray:
     return np.array([fold_of[g] for g in groups])
 
 
-def _fit(D: torch.Tensor, y: torch.Tensor, lam: float) -> torch.Tensor:
+def _sample_weights(w, device: str, n: int) -> torch.Tensor | None:
+    """Per-pair weights as a float tensor on `device`, or None for flat."""
+    if w is None:
+        return None
+    if isinstance(w, torch.Tensor):
+        sw = w.detach().to(device=device, dtype=torch.float32)
+    else:
+        sw = torch.as_tensor(np.asarray(w, dtype=np.float32), device=device)
+    if sw.shape != (n,):
+        raise ValueError(f"w has shape {tuple(sw.shape)}, expected ({n},)")
+    if bool((sw < 0).any()) or not bool((sw > 0).any()):
+        raise ValueError("w must be non-negative with a positive sum")
+    return sw
+
+
+def _normalized(sw: torch.Tensor | None) -> torch.Tensor | None:
+    """Weights normalized to mean 1 over the rows being fitted, so the BCE keeps its scale."""
+    return None if sw is None else sw / sw.mean()
+
+
+def _fit(D: torch.Tensor, y: torch.Tensor, lam: float,
+         sw: torch.Tensor | None = None) -> torch.Tensor:
     w = torch.zeros(D.shape[1], device=D.device, requires_grad=True)
     opt = torch.optim.LBFGS([w], max_iter=300, line_search_fn="strong_wolfe")
+    sw = _normalized(sw)
 
     def closure():
         opt.zero_grad()
-        bce = torch.nn.functional.binary_cross_entropy_with_logits(D @ w, y)
+        bce = torch.nn.functional.binary_cross_entropy_with_logits(D @ w, y, weight=sw)
         loss = bce + lam * (w**2).sum() / len(y)
         loss.backward()
         return loss
@@ -69,7 +96,11 @@ def _acc(D: torch.Tensor, y: torch.Tensor, w: torch.Tensor) -> float:
 
 def fit_bt(D: torch.Tensor, y: torch.Tensor, groups: np.ndarray, device: str,
            lambdas: tuple[float, ...] = LAMBDAS,
-           folds: int = 5) -> tuple[torch.Tensor, float, float]:
+           folds: int = 5, w=None) -> tuple[torch.Tensor, float, float]:
+    """Bradley-Terry weights on pair differences `D`, with L2 chosen by `folds`-fold CV grouped
+    by `groups`. `w`: optional per-row sample weights (weighted BCE; CV accuracy stays
+    unweighted). Returns (weights, lambda, cv accuracy)."""
+    sw = _sample_weights(w, device, len(y))
     fold = _folds(groups, folds)
     best = (-1.0, lambdas[-1])
     for lam in lambdas:
@@ -77,11 +108,13 @@ def fit_bt(D: torch.Tensor, y: torch.Tensor, groups: np.ndarray, device: str,
         for k in range(folds):
             tr = torch.as_tensor(np.flatnonzero(fold != k), device=device)
             va = torch.as_tensor(np.flatnonzero(fold == k), device=device)
-            accs.append(_acc(D[va], y[va], _fit(D[tr], y[tr], lam)))
+            extra = {} if sw is None else {"sw": sw[tr]}
+            accs.append(_acc(D[va], y[va], _fit(D[tr], y[tr], lam, **extra)))
         score = float(np.mean(accs))
         if score > best[0] or (score == best[0] and lam > best[1]):
             best = (score, lam)
-    return _fit(D, y, best[1]), best[1], best[0]
+    extra = {} if sw is None else {"sw": sw}
+    return _fit(D, y, best[1], **extra), best[1], best[0]
 
 
 def family_bootstrap(correct: np.ndarray, family: np.ndarray, n_boot: int = 2000,
@@ -103,7 +136,10 @@ def _standardize(X: np.ndarray, rows: np.ndarray) -> np.ndarray:
     return ((X - mu) / sd).astype(np.float32)
 
 
-def evaluate(X: np.ndarray, ps: ProbeSet, device: str = "cpu", seed: int = 0) -> ProbeResult:
+def evaluate(X: np.ndarray, ps: ProbeSet, device: str = "cpu", seed: int = 0,
+             w: np.ndarray | None = None) -> ProbeResult:
+    """`w`: optional per-pair weights over every pair of `ps` (only the training pairs' are
+    used); None = flat."""
     train = ~ps.test
     rows = np.unique(np.concatenate([ps.a_idx[train], ps.b_idx[train]]))
     Xs = _standardize(np.asarray(X, dtype=np.float32), rows)
@@ -111,11 +147,12 @@ def evaluate(X: np.ndarray, ps: ProbeSet, device: str = "cpu", seed: int = 0) ->
     y = torch.as_tensor(ps.y, device=device)
     tr = torch.as_tensor(np.flatnonzero(train), device=device)
     te = torch.as_tensor(np.flatnonzero(ps.test), device=device)
-    w, lam, cv = fit_bt(D[tr], y[tr], ps.family[train], device)
-    correct = ((D[te] @ w > 0).float() == y[te]).cpu().numpy().astype(bool)
+    extra = {} if w is None else {"w": np.asarray(w)[train]}
+    wt, lam, cv = fit_bt(D[tr], y[tr], ps.family[train], device, **extra)
+    correct = ((D[te] @ wt > 0).float() == y[te]).cpu().numpy().astype(bool)
     lo, hi = family_bootstrap(correct, ps.family[ps.test], seed=seed)
     return ProbeResult(heldout=float(correct.mean()), ci_lo=lo, ci_hi=hi,
-                       train_acc=_acc(D[tr], y[tr], w), cv_acc=cv, lam=lam, n_test=int(len(te)),
+                       train_acc=_acc(D[tr], y[tr], wt), cv_acc=cv, lam=lam, n_test=int(len(te)),
                        correct=correct)
 
 
@@ -125,9 +162,10 @@ def _mlp_scores(Xs: torch.Tensor, params: list[torch.Tensor]) -> torch.Tensor:
 
 
 def _fit_mlp(Xs: torch.Tensor, a: torch.Tensor, b: torch.Tensor, y: torch.Tensor, lam: float,
-             hidden: int, seed: int) -> list[torch.Tensor]:
+             hidden: int, seed: int, sw: torch.Tensor | None = None) -> list[torch.Tensor]:
     """A scalar scorer s(look); P(A > B) = sigmoid(s(A) - s(B)). Full-batch LBFGS, L2 on
-    both weight matrices, initialised on the CPU from `seed` so every device starts alike."""
+    both weight matrices, initialised on the CPU from `seed` so every device starts alike.
+    `sw`: optional per-pair sample weights (normalized to mean 1 here)."""
     g = torch.Generator().manual_seed(seed)
     d = Xs.shape[1]
     params = [(torch.randn(d, hidden, generator=g) / d**0.5).to(Xs.device),
@@ -136,11 +174,12 @@ def _fit_mlp(Xs: torch.Tensor, a: torch.Tensor, b: torch.Tensor, y: torch.Tensor
     for p in params:
         p.requires_grad_(True)
     opt = torch.optim.LBFGS(params, max_iter=300, line_search_fn="strong_wolfe")
+    sw = _normalized(sw)
 
     def closure():
         opt.zero_grad()
         s = _mlp_scores(Xs, params)
-        bce = torch.nn.functional.binary_cross_entropy_with_logits(s[a] - s[b], y)
+        bce = torch.nn.functional.binary_cross_entropy_with_logits(s[a] - s[b], y, weight=sw)
         loss = bce + lam * ((params[0] ** 2).sum() + (params[2] ** 2).sum()) / len(y)
         loss.backward()
         return loss
@@ -156,15 +195,17 @@ def _mlp_correct(Xs, params, a, b, y) -> torch.Tensor:
 
 def evaluate_mlp(X: np.ndarray, ps: ProbeSet, device: str = "cpu", seed: int = 0,
                  hidden: int = MLP_HIDDEN, lambdas: tuple[float, ...] = MLP_LAMBDAS,
-                 folds: int = 5) -> ProbeResult:
+                 folds: int = 5, w: np.ndarray | None = None) -> ProbeResult:
     """`evaluate`'s protocol (standardize on training looks, L2 by family-grouped CV,
-    family-bootstrap CI) with a one-hidden-layer scorer in place of the linear one."""
+    family-bootstrap CI) with a one-hidden-layer scorer in place of the linear one.
+    `w`: optional per-pair weights over every pair of `ps`; None = flat."""
     train = ~ps.test
     rows = np.unique(np.concatenate([ps.a_idx[train], ps.b_idx[train]]))
     Xs = torch.as_tensor(_standardize(np.asarray(X, dtype=np.float32), rows), device=device)
     a = torch.as_tensor(ps.a_idx, device=device)
     b = torch.as_tensor(ps.b_idx, device=device)
     y = torch.as_tensor(ps.y, device=device)
+    sw = _sample_weights(w, device, len(ps.y))
     tr_idx = np.flatnonzero(train)
     fold = _folds(ps.family[train], folds)
     best = (-1.0, lambdas[-1])
@@ -173,14 +214,16 @@ def evaluate_mlp(X: np.ndarray, ps: ProbeSet, device: str = "cpu", seed: int = 0
         for k in range(folds):
             fit = torch.as_tensor(tr_idx[fold != k], device=device)
             val = torch.as_tensor(tr_idx[fold == k], device=device)
-            params = _fit_mlp(Xs, a[fit], b[fit], y[fit], lam, hidden, seed)
+            extra = {} if sw is None else {"sw": sw[fit]}
+            params = _fit_mlp(Xs, a[fit], b[fit], y[fit], lam, hidden, seed, **extra)
             accs.append(float(_mlp_correct(Xs, params, a[val], b[val], y[val]).float().mean()))
         score = float(np.mean(accs))
         if score > best[0] or (score == best[0] and lam > best[1]):
             best = (score, lam)
     tr = torch.as_tensor(tr_idx, device=device)
     te = torch.as_tensor(np.flatnonzero(ps.test), device=device)
-    params = _fit_mlp(Xs, a[tr], b[tr], y[tr], best[1], hidden, seed)
+    extra = {} if sw is None else {"sw": sw[tr]}
+    params = _fit_mlp(Xs, a[tr], b[tr], y[tr], best[1], hidden, seed, **extra)
     correct = _mlp_correct(Xs, params, a[te], b[te], y[te]).cpu().numpy().astype(bool)
     lo, hi = family_bootstrap(correct, ps.family[ps.test], seed=seed)
     train_acc = float(_mlp_correct(Xs, params, a[tr], b[tr], y[tr]).float().mean())
